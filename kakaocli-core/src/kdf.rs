@@ -10,17 +10,25 @@
 /// NOT as:
 ///   PRAGMA key = '<passphrase>'  ← this re-derives the key via SQLCipher's KDF and fails!
 
+use ring::digest::{digest, SHA1_FOR_LEGACY_USE_ONLY, SHA256};
 use ring::pbkdf2;
 use std::num::NonZeroU32;
 
+/// PBKDF2 iterations: 100,000 (matches kakaocli)
 const PBKDF2_ITERATIONS: NonZeroU32 =
     unsafe { NonZeroU32::new_unchecked(100_000) };
-const PBKDF2_OUTPUT_LEN: usize = 128;  // 128 bytes
+/// PBKDF2 output length in bytes (kakaocli uses 128)
+const PBKDF2_OUTPUT_LEN: usize = 128;
+
+/// SHA-1 digest output length
+const SHA1_LEN: usize = 20;
+/// SHA-256 digest output length
+const SHA256_LEN: usize = 32;
 
 /// Derive hex-encoded raw SQLCipher key (64 hex chars = 32 bytes).
 ///
 /// Algorithm (identical to kakaocli's KeyDerivation.secureKey):
-/// 1. Hash device UUID with SHA-1 + SHA-256, base64 encode
+/// 1. Hash device UUID with SHA-1 + SHA-256 → concatenate → base64 encode
 /// 2. Build password string from userId + UUID + fixed salts
 /// 3. PBKDF2-HMAC-SHA256, 100k iterations → 128 bytes
 /// 4. Take first 32 bytes → hex encode
@@ -29,7 +37,8 @@ pub fn derive_mac_key(user_id: u64, device_uuid: &str) -> String {
     let uuid_str = device_uuid.to_string();
     let user_str = user_id.to_string();
 
-    // Build password: reversed hakawai string
+    // Build password: A + hashed_uuid + "|" + F + uuid[:5] + H + userId + "|" + uuid[7..]
+    // joined with "F" between each part, then reversed
     let parts = [
         "A", &hashed, "|",
         "F", &uuid_str[..5.min(uuid_str.len())],
@@ -37,8 +46,9 @@ pub fn derive_mac_key(user_id: u64, device_uuid: &str) -> String {
         &uuid_str[7.min(uuid_str.len())..],
     ];
     let hawawa = parts.join("F");
+    let hawawa_rev: String = hawawa.chars().rev().collect();
 
-    // Salt: last 70% of UUID
+    // Salt: last ~70% of UUID
     let salt_start = (uuid_str.len() as f64 * 0.3).ceil() as usize;
     let salt = &uuid_str[salt_start..];
 
@@ -48,7 +58,7 @@ pub fn derive_mac_key(user_id: u64, device_uuid: &str) -> String {
         pbkdf2::PBKDF2_HMAC_SHA256,
         PBKDF2_ITERATIONS,
         salt.as_bytes(),
-        hawawa.as_bytes(),
+        hawawa_rev.as_bytes(),
         &mut output,
     );
 
@@ -62,43 +72,52 @@ pub fn derive_mac_db_name(user_id: u64, device_uuid: &str) -> String {
     let user_str = user_id.to_string();
     let reversed_uuid: String = uuid_str.chars().rev().collect();
 
+    // Build password: . + F + userId + A + F + reversed_uuid + . + "|"
+    // joined with "." between each part
     let parts = [
         ".", "F", &user_str, "A", "F",
         &reversed_uuid, ".", "|",
     ];
     let hawawa = parts.join(".");
 
+    // Salt: reversed hashed device UUID
     let hashed_rev: String = hashed_device_uuid(device_uuid).chars().rev().collect();
-    let salt = &hashed_rev;
 
     let mut output = [0u8; PBKDF2_OUTPUT_LEN];
     pbkdf2::derive(
         pbkdf2::PBKDF2_HMAC_SHA256,
         PBKDF2_ITERATIONS,
-        salt.as_bytes(),
+        hashed_rev.as_bytes(),
         hawawa.as_bytes(),
         &mut output,
     );
 
     let hex_full = hex::encode(output);
-    // Take bytes [14..53] (kakaocli uses: start=28, end=78 in hex = 14, 53 in byte indices)
-    let start = 28; // hex chars
-    let end = 78;
-    hex_full[start..end].to_string()
+    // Take hex chars [28..78) (kakaocli compatibility)
+    hex_full[28..78].to_string()
 }
 
 /// SHA-1 + SHA-256 of UUID, base64-encoded (kakaocli compatible)
+///
+/// Equivalent to Swift:
+/// ```swift
+/// CC_SHA1(data, len, sha1_ptr)
+/// CC_SHA256(data, len, sha256_ptr)
+/// return (sha1 + sha256).base64EncodedString()
+/// ```
 fn hashed_device_uuid(uuid: &str) -> String {
-    use sha1::{Digest, Sha1};
-    use sha2::Sha256;
-
     let data = uuid.as_bytes();
 
-    let sha1 = Sha1::digest(data);
-    let sha256 = Sha256::digest(data);
+    let sha1_result = digest(&SHA1_FOR_LEGACY_USE_ONLY, data);
+    let sha256_result = digest(&SHA256, data);
 
-    let combined = [sha1.as_slice(), sha256.as_slice()].concat();
-    base64::encode(&combined)
+    // Concatenate SHA-1 (20 bytes) + SHA-256 (32 bytes)
+    let mut combined = Vec::with_capacity(SHA1_LEN + SHA256_LEN);
+    combined.extend_from_slice(sha1_result.as_ref());
+    combined.extend_from_slice(sha256_result.as_ref());
+
+    use base64::engine::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(&combined)
 }
 
 #[cfg(test)]
@@ -107,7 +126,6 @@ mod tests {
 
     #[test]
     fn test_derive_key_deterministic() {
-        // Must produce same output for same inputs
         let key1 = derive_mac_key(12345, "test-uuid-0000");
         let key2 = derive_mac_key(12345, "test-uuid-0000");
         assert_eq!(key1, key2);
@@ -122,9 +140,61 @@ mod tests {
     }
 
     #[test]
+    fn test_different_uuid_different_key() {
+        let key1 = derive_mac_key(100, "uuid-AAAA");
+        let key2 = derive_mac_key(100, "uuid-BBBB");
+        assert_ne!(key1, key2);
+    }
+
+    #[test]
+    fn test_key_length_is_64_hex_chars() {
+        let key = derive_mac_key(42, "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(key.len(), 64);
+        // Verify it's valid hex
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
     fn test_db_name_deterministic() {
         let name1 = derive_mac_db_name(12345, "test-uuid");
         let name2 = derive_mac_db_name(12345, "test-uuid");
         assert_eq!(name1, name2);
+    }
+
+    #[test]
+    fn test_db_name_length() {
+        let name = derive_mac_db_name(42, "550e8400-e29b-41d4-a716-446655440000");
+        // kakaocli: start=28, end=78 in hex = 78-28 = 50 hex chars = 25 bytes
+        assert_eq!(name.len(), 50);
+    }
+
+    #[test]
+    fn test_db_name_different_user() {
+        let name1 = derive_mac_db_name(100, "same-uuid");
+        let name2 = derive_mac_db_name(200, "same-uuid");
+        assert_ne!(name1, name2);
+    }
+
+    #[test]
+    fn test_hashed_device_uuid_output_length() {
+        let hash = hashed_device_uuid("test-uuid");
+        // SHA-1 (20) + SHA-256 (32) = 52 bytes → base64 = 52 * 4/3 ≈ 70 chars (with padding)
+        assert!(!hash.is_empty());
+        assert!(hash.len() >= 68); // base64 encoded length
+    }
+
+    #[test]
+    fn test_hashed_device_uuid_deterministic() {
+        let h1 = hashed_device_uuid("550e8400-e29b-41d4-a716-446655440000");
+        let h2 = hashed_device_uuid("550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_reverse_password_string() {
+        // Verify the "reversed" aspect of derive_mac_key
+        let key = derive_mac_key(42, "short");
+        // Just verify it doesn't panic with short UUIDs
+        assert_eq!(key.len(), 64);
     }
 }

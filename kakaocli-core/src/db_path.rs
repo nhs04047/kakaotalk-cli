@@ -1,4 +1,11 @@
 /// macOS/Windows KakaoTalk database path discovery, user ID extraction, and TCC checks.
+///
+/// # Platform safety
+/// - macOS-specific functions use `#[cfg(target_os = "macos")]` where they depend
+///   on macOS-only APIs (accessibility).
+/// - Path functions work on all platforms (returns correct paths for the target OS).
+/// - Linux compiles but only `mac_container_path()` and `windows_chat_data_path()`
+///   format tests are meaningful.
 
 use std::path::PathBuf;
 
@@ -22,8 +29,8 @@ pub fn mac_db_files() -> Vec<PathBuf> {
                 .map(|e| e.path())
                 .filter(|p| {
                     if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                        // Hex filename (64+ chars) and not -wal/-shm
-                        name.len() >= 64
+                        // Hex filename (50+ chars from DB name) and not -wal/-shm
+                        name.len() >= 50
                             && name.chars().all(|c| c.is_ascii_hexdigit())
                             && !name.ends_with("-wal")
                             && !name.ends_with("-shm")
@@ -37,10 +44,11 @@ pub fn mac_db_files() -> Vec<PathBuf> {
 }
 
 /// macOS: extract user ID from FSChatWindowTransparency preferences plist
+///
+/// KakaoTalk stores user ID in:
+///   ~/Library/Preferences/com.kakao.KakaoTalkMac.plist
+/// Key: `FSChatWindowTransparency` → value format: `"ChatRoom_<userId>_..."`
 pub fn mac_user_id() -> Option<u64> {
-    // KakaoTalk stores user ID in:
-    // ~/Library/Preferences/com.kakao.KakaoTalkMac.plist
-    // Key: FSChatWindowTransparency → value format: "ChatRoom_<userId>_..."
     let prefs_path = {
         let home = std::env::var("HOME").ok()?;
         PathBuf::from(home)
@@ -52,7 +60,7 @@ pub fn mac_user_id() -> Option<u64> {
     }
 
     // Parse binary plist with `plist` crate
-    let plist_value = plist::from_file(&prefs_path).ok()?;
+    let plist_value: plist::Value = plist::from_file(&prefs_path).ok()?;
     let dict = plist_value.into_dictionary()?;
     let transparency_key = dict.get("FSChatWindowTransparency")?;
 
@@ -67,8 +75,8 @@ pub fn mac_user_id() -> Option<u64> {
 }
 
 /// macOS: get platform UUID from IOPlatformExpertDevice (ioreg)
+#[cfg(target_os = "macos")]
 pub fn mac_platform_uuid() -> Option<String> {
-    // Use `ioreg -rd1 -c IOPlatformExpertDevice`
     let output = std::process::Command::new("ioreg")
         .args(["-rd1", "-c", "IOPlatformExpertDevice"])
         .output()
@@ -92,18 +100,35 @@ pub fn mac_platform_uuid() -> Option<String> {
     None
 }
 
+/// macOS: get platform UUID stub for non-macOS (always returns None)
+///
+/// This allows the function to be called from platform-agnostic code;
+/// the real implementation only exists on macOS.
+#[cfg(not(target_os = "macos"))]
+pub fn mac_platform_uuid() -> Option<String> {
+    None
+}
+
 /// macOS: check Full Disk Access permission (can we read ~/Library/Containers?)
 pub fn check_full_disk_access() -> bool {
     mac_container_path().exists()
 }
 
 /// macOS: check Accessibility permission (can we interact with other apps' AX?)
+///
+/// Uses the `accessibility` crate to probe the system-wide AX element.
+/// On non-macOS, always returns `false`.
+#[cfg(target_os = "macos")]
 pub fn check_accessibility_permission() -> bool {
-    // Attempt AXAPIEnabled check; on newer macOS this is always granted if
-    // the app has the entitlement, so we probe by listing running apps' AX
-    use accessibility::AXUIElement;
-    let system_element = AXUIElement::system_wide();
+    // Probe by listing running apps' AX
+    let system_element = accessibility::AXUIElement::system_wide();
     system_element.focused_element().is_ok()
+}
+
+/// Stub for non-macOS platforms
+#[cfg(not(target_os = "macos"))]
+pub fn check_accessibility_permission() -> bool {
+    false
 }
 
 /// Windows: KakaoTalk chat_data directory
@@ -153,5 +178,11 @@ mod tests {
         let s = path.to_string_lossy();
         assert!(s.contains("Kakao"));
         assert!(s.contains("chat_data"));
+    }
+
+    #[test]
+    fn test_check_accessibility_permission_exists() {
+        // Should always return a bool without panicking
+        let _result = check_accessibility_permission();
     }
 }
