@@ -47,11 +47,6 @@ pub struct Message {
 }
 
 /// Message type — `#[repr(i32)]` + manual `From<i32>` for DB integer mapping.
-///
-/// # Important
-/// Rust enum variants with explicit discriminants like `Text = 1` do NOT
-/// implement `From<i32>` automatically — we provide the mapping manually.
-/// Serde derives are safe because they use the variant name, not the discriminant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[repr(i32)]
 pub enum MessageType {
@@ -70,6 +65,23 @@ impl From<i32> for MessageType {
             other => Self::Unknown(other),
         }
     }
+}
+
+/// KakaoTalk friend (NTUser)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Friend {
+    pub user_id: i64,
+    pub nick_name: Option<String>,
+    pub friend_nick_name: Option<String>,
+    pub display_name: Option<String>,
+}
+
+/// Unified search results
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResults {
+    pub messages: Vec<Message>,
+    pub rooms: Vec<Chat>,
+    pub friends: Vec<Friend>,
 }
 
 /// Application status result
