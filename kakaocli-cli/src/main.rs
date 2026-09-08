@@ -167,7 +167,9 @@ fn main() {
             cmd_find(&cli, keyword, *exact, *regex, *rooms, *friends, *all)
         }
         Command::Query { sql } => cmd_query(&cli, sql),
-        Command::Send { .. } => cmd_not_implemented("send (Phase 2)"),
+        Command::Send { chat , message , me , dry_run  } => {
+            cmd_send(&cli, chat, message, *me, *dry_run)
+        }
         Command::Sync { .. } => cmd_not_implemented("sync (Phase 4)"),
         Command::Inspect { .. } => cmd_not_implemented("inspect (Phase 2)"),
         Command::Login { email, password, status, clear } => {
@@ -392,6 +394,21 @@ fn cmd_query(cli: &Cli, sql: &str) -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?);
     }
 
+    Ok(())
+}
+
+fn cmd_send(cli: &Cli, chat_name: &str, text: &str, me: bool, dry_run: bool) -> Result<(), String> {
+    let target_name = if me { "_" } else { chat_name };
+
+    if dry_run {
+        println!("🔍 Dry-run: would send to '{}': {}", target_name, text);
+        return Ok(());
+    }
+
+    kakaocli_platform::Platform::send_message(target_name, text)
+        .map_err(|e| format!("Send failed: {}", e))?;
+
+    println!("✅ Message sent to '{}'", target_name);
     Ok(())
 }
 
