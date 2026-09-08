@@ -1,0 +1,13 @@
+[package]
+name = "kakaocli-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kakaocli-core = { path = "../kakaocli-core" }
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

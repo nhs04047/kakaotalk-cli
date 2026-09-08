@@ -1,0 +1,1 @@
+//! kakaocli-auth: Credential storage (macOS Keychain / Windows Credential Manager).

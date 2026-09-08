@@ -1,0 +1,1 @@
+//! kakaocli-db: SQLCipher database reader for KakaoTalk.
