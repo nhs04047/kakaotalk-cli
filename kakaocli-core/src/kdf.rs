@@ -16,7 +16,7 @@ use std::num::NonZeroU32;
 
 /// PBKDF2 iterations: 100,000 (matches kakaocli)
 const PBKDF2_ITERATIONS: NonZeroU32 =
-    unsafe { NonZeroU32::new_unchecked(100_000) };
+    NonZeroU32::new(100_000).expect("100k is non-zero");
 /// PBKDF2 output length in bytes (kakaocli uses 128)
 const PBKDF2_OUTPUT_LEN: usize = 128;
 
