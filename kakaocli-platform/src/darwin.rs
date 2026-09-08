@@ -35,7 +35,7 @@ impl PlatformBackend for DarwinBackend {
 
         // Check if KakaoTalk is running
         use objc2::rc::Retained;
-        use objc2_foundation::NSRunningApplication;
+        use objc2_app_kit::NSRunningApplication;
         let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(
             "com.kakao.KakaoTalkMac"
         );

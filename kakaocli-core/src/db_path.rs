@@ -116,13 +116,17 @@ pub fn check_full_disk_access() -> bool {
 
 /// macOS: check Accessibility permission (can we interact with other apps' AX?)
 ///
-/// Uses the `accessibility` crate to probe the system-wide AX element.
-/// On non-macOS, always returns `false`.
+/// Check if Accessibility permission is granted by calling
+/// ApplicationServices' AXIsProcessTrusted() (built-in macOS framework,
+/// no extra crate needed). On non-macOS, always returns `false`.
 #[cfg(target_os = "macos")]
 pub fn check_accessibility_permission() -> bool {
-    // Probe by listing running apps' AX
-    let system_element = accessibility::AXUIElement::system_wide();
-    system_element.focused_element().is_ok()
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> std::os::raw::c_int;
+    }
+    // SAFETY: AXIsProcessTrusted is a simple getter with no side effects.
+    unsafe { AXIsProcessTrusted() != 0 }
 }
 
 /// Stub for non-macOS platforms
