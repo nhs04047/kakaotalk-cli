@@ -51,8 +51,9 @@ pub fn derive_mac_key(user_id: u64, device_uuid: &str) -> String {
     let hawawa = parts.join("F");
     let hawawa_rev: String = hawawa.chars().rev().collect();
 
-    // Salt: last ~70% of UUID
-    let salt_start = (uuid_str.len() as f64 * 0.3).ceil() as usize;
+    // Salt: last ~70% of UUID — blluv 원본과 동일하게 int() = 버림
+    // Python: uuid[int(len(uuid) * 0.3):]  (36자 × 0.3 = 10.8 → 10)
+    let salt_start = (uuid_str.len() as f64 * 0.3) as usize;
     let salt = &uuid_str[salt_start..];
 
     // PBKDF2
@@ -200,5 +201,20 @@ mod tests {
         let key = derive_mac_key(42, "short");
         // Just verify it doesn't panic with short UUIDs
         assert_eq!(key.len(), 256);
+    }
+
+    #[test]
+    fn test_salt_truncation_matches_blluv() {
+        // blluv 원본: salt = uuid[int(len(uuid) * 0.3):]
+        // 36자 UUID → 36 * 0.3 = 10.8 → int() = 10 (버림, ceil 아님!)
+        let uuid = "1591D3B8-9C8A-4F1C-5620-ABCDEF123456"; // 36 chars
+        assert_eq!(uuid.len(), 36);
+
+        let salt_start = (uuid.len() as f64 * 0.3) as usize;
+        assert_eq!(salt_start, 10); // ceil이면 11 — 버그 재발 방지
+
+        let salt = &uuid[salt_start..];
+        assert_eq!(salt, &uuid[10..]);
+        assert_eq!(salt.len(), 26);
     }
 }
