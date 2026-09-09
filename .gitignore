@@ -1,2 +1,6 @@
 /target/
 **/*.rs.bk
+# Windows 로컬 빌드 스크립트/로그 (개발 편의, 커밋 제외)
+winbuild.ps1
+winbuild.bat
+wintest.log
