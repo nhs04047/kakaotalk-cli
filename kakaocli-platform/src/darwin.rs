@@ -103,6 +103,31 @@ impl PlatformBackend for DarwinBackend {
 
         Ok(())
     }
+
+    fn dump_ax_tree(chat: Option<&str>, max_depth: u32) -> Result<AxNode, PlatformError> {
+        if !check_accessibility() {
+            user_facing_instruction(
+                "inspect needs Accessibility permission.\n\
+                 → System Settings > Privacy & Security > Accessibility\n\
+                 → Add Terminal (or iTerm2) and enable it.",
+            );
+            return Err(PlatformError::Other(
+                "Accessibility permission not granted".into(),
+            ));
+        }
+
+        let app = get_kakaotalk_ax_app()
+            .ok_or_else(|| PlatformError::Other("KakaoTalk is not running".into()))?;
+
+        let root = ax_build_tree(&app, max_depth);
+
+        if let Some(chat_name) = chat {
+            // Filter to only relevant parts
+            Ok(filter_ax_for_chat(root, chat_name))
+        } else {
+            Ok(root)
+        }
+    }
 }
 
 // ── Core helpers ───────────────────────────────────────────────
@@ -672,4 +697,106 @@ fn press_escape() -> Result<(), String> {
     core_graphics::event::CGEvent::post_to_process(event_up);
 
     Ok(())
+}
+
+// ── AX tree dump (inspect command) ────────────────────────
+
+fn ax_build_tree(element: &accessibility::AXUIElement, max_depth: u32) -> AxNode {
+    if max_depth == 0 {
+        let mut node = AxNode::new("…");
+        node.description = "(max depth)".to_string();
+        return node;
+    }
+
+    let role = element
+        .attribute_value("AXRole".into())
+        .ok()
+        .and_then(|v| v.as_string().map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    let title = element
+        .attribute_value("AXTitle".into())
+        .ok()
+        .and_then(|v| v.as_string().map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    let desc = element
+        .attribute_value("AXDescription".into())
+        .ok()
+        .and_then(|v| v.as_string().map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    let focused = element
+        .attribute_value("AXFocused".into())
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let selected = element
+        .attribute_value("AXSelected".into())
+        .ok()
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut node = AxNode {
+        role: if role.is_empty() {
+            "(no role)".into()
+        } else {
+            role
+        },
+        title,
+        description: desc,
+        focused,
+        selected,
+        children: Vec::new(),
+    };
+
+    if let Ok(children_val) = element.attribute_value("AXChildren".into()) {
+        if let Some(arr) = children_val.as_array() {
+            for child in arr.iter().take(50) {
+                if let Some(child_el) = child.as_axui_element() {
+                    let child_node = ax_build_tree(child_el, max_depth - 1);
+                    node.children.push(child_node);
+                }
+            }
+        }
+    }
+
+    node
+}
+
+fn filter_ax_for_chat(root: AxNode, chat_name: &str) -> AxNode {
+    let name_lower = chat_name.to_lowercase();
+
+    let self_matches = root.title.to_lowercase().contains(&name_lower)
+        || root.description.to_lowercase().contains(&name_lower);
+
+    let filtered_children: Vec<AxNode> = root
+        .children
+        .into_iter()
+        .filter_map(|child| {
+            let filtered = filter_ax_for_chat(child, chat_name);
+            if filtered.title.is_empty()
+                && filtered.description.is_empty()
+                && filtered.children.is_empty()
+            {
+                None
+            } else {
+                Some(filtered)
+            }
+        })
+        .collect();
+
+    if self_matches || !filtered_children.is_empty() {
+        AxNode {
+            children: filtered_children,
+            ..root
+        }
+    } else {
+        AxNode {
+            role: root.role,
+            children: Vec::new(),
+            ..AxNode::new("")
+        }
+    }
 }

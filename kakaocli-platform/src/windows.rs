@@ -4,8 +4,8 @@
 // - windows-rs crate docs
 
 use crate::*;
-use kakaocli_core::model::DbKey;
 use kakaocli_core::db_path;
+use kakaocli_core::model::DbKey;
 
 pub struct WindowsBackend;
 
@@ -23,7 +23,9 @@ impl PlatformBackend for WindowsBackend {
             .cloned()
             .ok_or_else(|| PlatformError::Other("No .edb files found in chat_data".into()))?;
 
-        Err(PlatformError::Other("Windows DEK scanner not yet implemented".into()))
+        Err(PlatformError::Other(
+            "Windows DEK scanner not yet implemented".into(),
+        ))
     }
 
     fn check_status() -> Result<AppStatus, PlatformError> {
@@ -44,7 +46,7 @@ impl PlatformBackend for WindowsBackend {
             .map_err(|e| PlatformError::Other(e.to_string()))
     }
 
-    fn send_message(chat_name: &str, text: &str) -> Result<(), PlatformError> {
+    fn send_message(_chat_name: &str, _text: &str) -> Result<(), PlatformError> {
         // TODO: Implement UIAutomation send flow
         // 1. FindWindow → KakaoTalk main window
         // 2. IUIAutomation Tree → find chat ListItem by name
@@ -54,5 +56,11 @@ impl PlatformBackend for WindowsBackend {
         // 6. InvokePattern → send button
 
         Err(PlatformError::Other("Windows send not yet implemented".into()))
+    }
+
+    fn dump_ax_tree(_chat: Option<&str>, _max_depth: u32) -> Result<AxNode, PlatformError> {
+        Err(PlatformError::Other(
+            "inspect is only supported on macOS".into(),
+        ))
     }
 }

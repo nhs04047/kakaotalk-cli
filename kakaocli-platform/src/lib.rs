@@ -19,7 +19,32 @@ mod stub;
 pub use stub::StubBackend as Platform;
 
 use kakaocli_core::model::DbKey;
+use serde::Serialize;
 use thiserror::Error;
+
+/// AX tree node for inspect command
+#[derive(Debug, Clone, Serialize)]
+pub struct AxNode {
+    pub role: String,
+    pub title: String,
+    pub description: String,
+    pub focused: bool,
+    pub selected: bool,
+    pub children: Vec<AxNode>,
+}
+
+impl AxNode {
+    pub fn new(role: &str) -> Self {
+        Self {
+            role: role.to_string(),
+            title: String::new(),
+            description: String::new(),
+            focused: false,
+            selected: false,
+            children: Vec::new(),
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum PlatformError {
@@ -62,4 +87,7 @@ pub trait PlatformBackend {
     /// - 전송 전 열린 방의 제목을 재확인 (ChatVerificationFailed)
     /// - 동일한 chat_name이 여러 개면 AmbiguousChatName
     fn send_message(chat_name: &str, text: &str) -> Result<(), PlatformError>;
+
+    /// AX 트리 덤프 (디버깅용, macOS only)
+    fn dump_ax_tree(chat: Option<&str>, max_depth: u32) -> Result<AxNode, PlatformError>;
 }

@@ -1,6 +1,9 @@
 //! Display helpers for kakaocli-cli human-readable output.
 
 use kakaocli_core::model::*;
+use kakaocli_platform::AxNode;
+
+use std::fmt::Write as FmtWrite;
 
 /// Print chat rooms in a table.
 pub fn print_chats(chats: &[Chat]) {
@@ -143,5 +146,48 @@ fn format_timestamp(ts: i64) -> String {
     match dt {
         Some(dt) => dt.format("%m-%d %H:%M").to_string(),
         None => ts.to_string(),
+    }
+}
+
+/// Print AX tree for inspect command
+pub fn print_ax_tree(node: &AxNode, depth: u32) {
+    if depth > 0 && node.role.is_empty() && node.title.is_empty() && node.description.is_empty() && node.children.is_empty() {
+        return;
+    }
+
+    let prefix = if depth == 0 {
+        String::new()
+    } else {
+        let indent = "  ".repeat(depth as usize - 1);
+        format!("{}├── ", indent)
+    };
+
+    let mut meta = String::new();
+    if !node.title.is_empty() {
+        let _ = write!(meta, " title=\"{}\"", node.title);
+    }
+    if !node.description.is_empty() {
+        let _ = write!(meta, " description=\"{}\"", node.description);
+    }
+    if node.focused {
+        meta.push_str(" focused=1");
+    }
+    if node.selected {
+        meta.push_str(" selected=1");
+    }
+
+    println!("{}{}[{}]{}", prefix, "[", node.role, meta);
+
+    // If at max depth, show [...] marker
+    if depth > 0 && node.children.is_empty() && !node.role.is_empty() {
+        let indent = "  ".repeat(depth as usize) + "  ";
+        // Check for truncation hint
+        if node.role == "…" && node.description == "(max depth)" {
+            println!("{}  └── …(max depth)", indent);
+        }
+    }
+
+    for child in &node.children {
+        print_ax_tree(child, depth + 1);
     }
 }

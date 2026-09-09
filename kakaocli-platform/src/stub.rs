@@ -9,25 +9,31 @@ pub struct StubBackend;
 impl PlatformBackend for StubBackend {
     fn resolve_db_key() -> Result<DbKey, PlatformError> {
         Err(PlatformError::Other(
-            "kakaocli is only supported on macOS and Windows".into()
+            "kakaocli is only supported on macOS and Windows".into(),
         ))
     }
 
     fn check_status() -> Result<AppStatus, PlatformError> {
         Err(PlatformError::Other(
-            "kakaocli is only supported on macOS and Windows".into()
+            "kakaocli is only supported on macOS and Windows".into(),
         ))
     }
 
     fn login(_email: &str, _password: &str) -> Result<(), PlatformError> {
         Err(PlatformError::Other(
-            "kakaocli is only supported on macOS and Windows".into()
+            "kakaocli is only supported on macOS and Windows".into(),
         ))
     }
 
     fn send_message(_chat_name: &str, _text: &str) -> Result<(), PlatformError> {
         Err(PlatformError::Other(
-            "kakaocli is only supported on macOS and Windows".into()
+            "kakaocli is only supported on macOS and Windows".into(),
+        ))
+    }
+
+    fn dump_ax_tree(_chat: Option<&str>, _max_depth: u32) -> Result<AxNode, PlatformError> {
+        Err(PlatformError::Other(
+            "inspect is only supported on macOS".into(),
         ))
     }
 }

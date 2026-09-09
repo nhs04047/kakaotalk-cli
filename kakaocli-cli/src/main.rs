@@ -116,6 +116,17 @@ enum Command {
         dry_run: bool,
     },
 
+    /// AX 트리 덤프 (디버깅용, macOS only)
+    Inspect {
+        /// 채팅방 이름 필터
+        #[arg(long)]
+        chat: Option<String>,
+
+        /// 트리 깊이 제한 (기본 3)
+        #[arg(long, default_value = "3")]
+        depth: u32,
+    },
+
     /// 새 메시지 모니터링 (Phase 4)
     #[command(aliases = ["tail"])]
     Sync {
@@ -125,12 +136,6 @@ enum Command {
         /// 폴링 간격 (초)
         #[arg(long, default_value = "2")]
         interval: u32,
-    },
-
-    /// AX/UIA 트리 덤프 (Phase 2)
-    Inspect {
-        #[arg(long)]
-        chat: Option<String>,
     },
 
     /// 로그인/인증
@@ -171,7 +176,7 @@ fn main() {
             cmd_send(&cli, chat, message, *me, *dry_run)
         }
         Command::Sync { .. } => cmd_not_implemented("sync (Phase 4)"),
-        Command::Inspect { .. } => cmd_not_implemented("inspect (Phase 2)"),
+        Command::Inspect { chat, depth } => cmd_inspect(&cli, chat.as_deref(), *depth),
         Command::Login { email, password, status, clear } => {
             cmd_login(&cli, email.as_deref(), password.as_deref(), *status, *clear)
         }
@@ -397,6 +402,20 @@ fn cmd_query(cli: &Cli, sql: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_inspect(_cli: &Cli, chat: Option<&str>, depth: u32) -> Result<(), String> {
+    use kakaocli_platform::PlatformBackend;
+    let tree = kakaocli_platform::Platform::dump_ax_tree(chat, depth)
+        .map_err(|e| format!("Inspect failed: {}", e))?;
+
+    if _cli.json {
+        println!("{}", serde_json::to_string_pretty(&tree).map_err(|e| e.to_string())?);
+    } else {
+        display::print_ax_tree(&tree, 0);
+    }
+
+    Ok(())
+}
+
 fn cmd_send(cli: &Cli, chat_name: &str, text: &str, me: bool, dry_run: bool) -> Result<(), String> {
     let target_name = if me { "_" } else { chat_name };
 
@@ -404,6 +423,8 @@ fn cmd_send(cli: &Cli, chat_name: &str, text: &str, me: bool, dry_run: bool) -> 
         println!("🔍 Dry-run: would send to '{}': {}", target_name, text);
         return Ok(());
     }
+
+    use kakaocli_platform::PlatformBackend;
 
     kakaocli_platform::Platform::send_message(target_name, text)
         .map_err(|e| format!("Send failed: {}", e))?;
