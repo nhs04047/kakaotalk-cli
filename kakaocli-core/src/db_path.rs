@@ -96,18 +96,44 @@ pub fn mac_user_id() -> Option<u64> {
         });
 
         if let Some(active_hash) = active_hash {
-            // Brute-force SHA-512 from 0 upward until we find a match.
-            // userIds are typically small integers (< 1M).
+            // Brute-force SHA-512 to recover userId.
+            // userIds are 8-9 digits (10^7..10^9). Parallel over the full range,
+            // ~1-2 min on modern Mac (SHA-512 is fast).
+            eprintln!("🔐 SHA-512 userId 역산 시작 (0..1,000,000,000, 멀티스레드)...");
+            let start = std::time::Instant::now();
             use ring::digest::{digest, SHA512};
-            let max_id = 1_000_000;
-            for candidate in 0..max_id {
+            use rayon::prelude::*;
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            let counter = AtomicU64::new(0);
+            let max_id: u64 = 1_000_000_000;
+
+            let found = (0..max_id).into_par_iter().find_map_any(|candidate| {
+                let n = counter.fetch_add(1, Ordering::Relaxed);
+                if n % 50_000_000 == 0 {
+                    let elapsed = start.elapsed().as_secs();
+                    eprintln!(
+                        "⏳ {}M/1000M 진행 ({}초 경과)...",
+                        n / 1_000_000,
+                        elapsed
+                    );
+                }
                 let id_str = candidate.to_string();
                 let computed = digest(&SHA512, id_str.as_bytes());
                 let computed_hex = hex::encode(computed.as_ref());
                 if computed_hex == active_hash {
-                    return Some(candidate);
+                    Some(candidate as u64)
+                } else {
+                    None
                 }
+            });
+
+            if let Some(user_id) = found {
+                let elapsed = start.elapsed().as_secs_f64();
+                eprintln!("✅ userId = {} ({}초 소요)", user_id, elapsed);
+                return Some(user_id);
             }
+            eprintln!("❌ 10억 범위 내에서 userId를 찾지 못했습니다.");
         }
     }
 
