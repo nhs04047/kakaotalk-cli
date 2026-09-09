@@ -45,11 +45,7 @@ enum Command {
     Check,
 
     /// DB 복호화 검증
-    Auth {
-        /// Show derived key/DB name for debugging
-        #[arg(long)]
-        verbose: bool,
-    },
+    Auth,
 
     /// 채팅방 목록
     #[command(aliases = ["rooms"])]
@@ -172,7 +168,7 @@ fn main() {
 
     let result = match &cli.command {
         Command::Check { .. } => cmd_check(&cli),
-        Command::Auth { verbose } => cmd_auth(&cli, *verbose),
+        Command::Auth => cmd_auth(&cli),
         Command::Chats { limit } => cmd_chats(&cli, *limit),
         Command::Msg { chat, since, limit } => {
             cmd_messages(&cli, chat.as_deref(), since.as_deref(), *limit)
@@ -192,7 +188,7 @@ fn main() {
     };
 
     if let Err(err) = result {
-        eprintln!("{}", display::style_err(&format!("Error: {}", err)));
+        eprintln!("{}", display::style_err(&format!("오류: {}", err)));
         std::process::exit(1);
     }
 }
@@ -200,7 +196,7 @@ fn main() {
 // ── Helpers ────────────────────────────────────────────────
 
 fn not_implemented_yet(feature: &str) -> ! {
-    eprintln!("{} is not yet implemented (see roadmap in docs/roadmap.md)", feature);
+    eprintln!("{}: 아직 구현되지 않았습니다 (docs/roadmap.md 참고)", feature);
     std::process::exit(1);
 }
 
@@ -217,7 +213,7 @@ fn open_db(cli: &Cli) -> Result<Database, String> {
     } else {
         let hint = "힌트: userId를 모르면 `kakaocli --user-id <본인_카카오_id> auth` 실행 (1회 입력, 이후 ~/.kakaocli/user_id 캐시)";
         kakaocli_platform::Platform::resolve_db_key(cli.user_id)
-            .map_err(|e| format!("Cannot resolve DB key: {}\n\n{}", e, hint))?
+            .map_err(|e| format!("DB 키를 확인할 수 없습니다: {}\n\n{}", e, hint))?
     };
 
     let my_uid = cli
@@ -226,7 +222,7 @@ fn open_db(cli: &Cli) -> Result<Database, String> {
         .unwrap_or(0) as i64;
 
     let db = Database::open(&db_key.db_path, &db_key.key_hex, my_uid)
-        .map_err(|e| format!("Failed to open database: {}", e))?;
+        .map_err(|e| format!("데이터베이스 열기 실패: {}", e))?;
 
     Ok(db)
 }
@@ -270,7 +266,7 @@ impl std::fmt::Display for ChatChoice {
 fn pick_chat_interactive(db: &Database) -> Result<(i64, String), String> {
     let chats = db
         .list_chats(200)
-        .map_err(|e| format!("Failed to list chats: {}", e))?;
+        .map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
 
     if chats.is_empty() {
         return Err("표시할 채팅방이 없습니다.".to_string());
@@ -299,44 +295,44 @@ fn cmd_check(cli: &Cli) -> Result<(), String> {
         Ok(status) => {
             let status_str = match &status {
                 kakaocli_platform::AppStatus::Ready => {
-                    display::style_success("✅ Ready (app running + DB accessible)")
+                    display::style_success("✅ 준비됨 (앱 실행 중 + DB 접근 가능)")
                 }
                 kakaocli_platform::AppStatus::LoggedOut => {
-                    display::style_warn("⚠️  App running but not logged in")
+                    display::style_warn("⚠️ 앱은 실행 중이지만 로그인되지 않았습니다")
                 }
                 kakaocli_platform::AppStatus::NotRunning => {
-                    display::style_warn("⚠️  KakaoTalk not running")
+                    display::style_warn("⚠️ 카카오톡이 실행 중이 아닙니다")
                 }
                 kakaocli_platform::AppStatus::DbAccessible => {
-                    display::style_success("✅ DB accessible (app not running)")
+                    display::style_success("✅ DB 접근 가능 (앱 미실행)")
                 }
             };
             println!("{}", status_str);
 
             if cli.verbose {
                 let db_path = kakaocli_core::db_path::mac_container_path();
-                println!("  Container: {}", db_path.display());
-                println!("  Full Disk Access: {}", kakaocli_core::db_path::check_full_disk_access());
+                println!("  컨테이너: {}", db_path.display());
+                println!("  전체 디스크 접근: {}", kakaocli_core::db_path::check_full_disk_access());
             }
 
             Ok(())
         }
-        Err(e) => Err(format!("Status check failed: {}", e)),
+        Err(e) => Err(format!("상태 확인 실패: {}", e)),
     }
 }
 
-fn cmd_auth(cli: &Cli, verbose: bool) -> Result<(), String> {
+fn cmd_auth(cli: &Cli) -> Result<(), String> {
     // Verify DB can be opened (may trigger a slow userId SHA-512 역산 on macOS)
     let db = with_spinner(
         "DB 키 확인 중... (userId 역산이 필요하면 최대 1~2분 소요될 수 있습니다)",
         || open_db(cli),
     )?;
-    let tables = db.verify_tables().map_err(|e| format!("Verify failed: {}", e))?;
+    let tables = db.verify_tables().map_err(|e| format!("테이블 확인 실패: {}", e))?;
 
-    println!("{}", display::style_success("✅ Database opened successfully!"));
-    println!("   Tables found: {}", tables.len());
+    println!("{}", display::style_success("✅ 데이터베이스 열기 성공!"));
+    println!("   테이블 {}개 발견", tables.len());
 
-    if verbose || cli.verbose {
+    if cli.verbose {
         for t in &tables {
             println!("   - {}", t);
         }
@@ -347,7 +343,7 @@ fn cmd_auth(cli: &Cli, verbose: bool) -> Result<(), String> {
 
 fn cmd_chats(cli: &Cli, limit: u32) -> Result<(), String> {
     let db = open_db(cli)?;
-    let chats = db.list_chats(limit).map_err(|e| format!("Failed to list chats: {}", e))?;
+    let chats = db.list_chats(limit).map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
 
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&chats).map_err(|e| e.to_string())?);
@@ -365,8 +361,8 @@ fn cmd_messages(cli: &Cli, chat: Option<&str>, since: Option<&str>, limit: u32) 
     let (chat_id, chat_name) = match chat {
         Some(name) => db
             .resolve_chat_id(name)
-            .map_err(|e| format!("Chat lookup failed: {}", e))?
-            .ok_or_else(|| format!("Chat '{}' not found", name))?,
+            .map_err(|e| format!("채팅방 조회 실패: {}", e))?
+            .ok_or_else(|| format!("'{}' 채팅방을 찾지 못했습니다. 이름 없이 실행하면 목록에서 고를 수 있어요 (kakaocli msg)", name))?,
         None => pick_chat_interactive(&db)?,
     };
 
@@ -375,7 +371,7 @@ fn cmd_messages(cli: &Cli, chat: Option<&str>, since: Option<&str>, limit: u32) 
 
     let messages = db
         .get_messages(chat_id, since_ts, limit)
-        .map_err(|e| format!("Failed to get messages: {}", e))?;
+        .map_err(|e| format!("메시지 조회 실패: {}", e))?;
 
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&messages).map_err(|e| e.to_string())?);
@@ -390,7 +386,7 @@ fn cmd_find(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, fri
     let db = open_db(cli)?;
 
     if all {
-        let results = db.search_all(keyword, 50).map_err(|e| format!("Search failed: {}", e))?;
+        let results = db.search_all(keyword, 50).map_err(|e| format!("검색 실패: {}", e))?;
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?);
         } else {
@@ -400,7 +396,7 @@ fn cmd_find(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, fri
     }
 
     if rooms {
-        let results = db.search_rooms(keyword, 50).map_err(|e| format!("Room search failed: {}", e))?;
+        let results = db.search_rooms(keyword, 50).map_err(|e| format!("채팅방 검색 실패: {}", e))?;
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?);
         } else {
@@ -410,7 +406,7 @@ fn cmd_find(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, fri
     }
 
     if friends {
-        let results = db.search_friends(keyword, 50).map_err(|e| format!("Friend search failed: {}", e))?;
+        let results = db.search_friends(keyword, 50).map_err(|e| format!("친구 검색 실패: {}", e))?;
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?);
         } else {
@@ -422,7 +418,7 @@ fn cmd_find(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, fri
     // Message search (default)
     if exact {
         // Use LIKE superset + filter in Rust
-        let results = db.search_messages(keyword, 200).map_err(|e| format!("Search failed: {}", e))?;
+        let results = db.search_messages(keyword, 200).map_err(|e| format!("검색 실패: {}", e))?;
         let exact_results: Vec<&Message> = results.iter().filter(|m| {
             m.text.as_deref() == Some(keyword)
         }).collect();
@@ -436,8 +432,8 @@ fn cmd_find(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, fri
     }
 
     if regex {
-        let re = regex::Regex::new(keyword).map_err(|e| format!("Invalid regex: {}", e))?;
-        let results = db.search_messages("", 200).map_err(|e| format!("Search failed: {}", e))?;
+        let re = regex::Regex::new(keyword).map_err(|e| format!("잘못된 정규식: {}", e))?;
+        let results = db.search_messages("", 200).map_err(|e| format!("검색 실패: {}", e))?;
         let regex_results: Vec<&Message> = results.iter().filter(|m| {
             m.text.as_deref().map(|t| re.is_match(t)).unwrap_or(false)
         }).collect();
@@ -451,7 +447,7 @@ fn cmd_find(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, fri
     }
 
     // Default: LIKE search
-    let results = db.search_messages(keyword, 50).map_err(|e| format!("Search failed: {}", e))?;
+    let results = db.search_messages(keyword, 50).map_err(|e| format!("검색 실패: {}", e))?;
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?);
     } else {
@@ -463,12 +459,12 @@ fn cmd_find(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, fri
 
 fn cmd_query(cli: &Cli, sql: &str) -> Result<(), String> {
     let db = open_db(cli)?;
-    let result = db.raw_query(sql).map_err(|e| format!("Query failed: {}", e))?;
+    let result = db.raw_query(sql).map_err(|e| format!("쿼리 실패: {}", e))?;
 
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?);
     } else {
-        println!("{}", serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?);
+        display::print_query_result(&result);
     }
 
     Ok(())
@@ -477,7 +473,7 @@ fn cmd_query(cli: &Cli, sql: &str) -> Result<(), String> {
 fn cmd_inspect(cli: &Cli, chat: Option<&str>, depth: u32) -> Result<(), String> {
     use kakaocli_platform::PlatformBackend;
     let tree = kakaocli_platform::Platform::dump_ax_tree(chat, depth)
-        .map_err(|e| format!("Inspect failed: {}", e))?;
+        .map_err(|e| format!("Inspect 실패: {}", e))?;
 
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&tree).map_err(|e| e.to_string())?);
@@ -520,7 +516,7 @@ fn cmd_send(
         println!(
             "{}",
             display::style_dim(&format!(
-                "🔍 Dry-run: would send to '{}': {}",
+                "🔍 미리보기: '{}'에 전송 예정 → {}",
                 target_name, text
             ))
         );
@@ -548,52 +544,52 @@ fn cmd_send(
     use kakaocli_platform::PlatformBackend;
 
     kakaocli_platform::Platform::send_message(&target_name, &text)
-        .map_err(|e| format!("Send failed: {}", e))?;
+        .map_err(|e| format!("전송 실패: {}", e))?;
 
     println!(
         "{}",
-        display::style_success(&format!("✅ Message sent to '{}'", target_name))
+        display::style_success(&format!("✅ '{}'에 메시지를 전송했습니다", target_name))
     );
     Ok(())
 }
 
 fn cmd_login(_cli: &Cli, email: Option<&str>, password: Option<&str>, status: bool, clear: bool) -> Result<(), String> {
     if clear {
-        kakaocli_auth::clear_credentials().map_err(|e| format!("Failed to clear: {}", e))?;
-        println!("Credentials cleared.");
+        kakaocli_auth::clear_credentials().map_err(|e| format!("삭제 실패: {}", e))?;
+        println!("저장된 인증 정보를 삭제했습니다.");
         return Ok(());
     }
 
     if status {
         if kakaocli_auth::has_credentials() {
-            let (email, _) = kakaocli_auth::get_credentials().map_err(|e| format!("Failed to read: {}", e))?;
+            let (email, _) = kakaocli_auth::get_credentials().map_err(|e| format!("읽기 실패: {}", e))?;
             println!(
                 "{}",
-                display::style_success(&format!("✅ Credentials stored for: {}", email))
+                display::style_success(&format!("✅ 저장된 계정: {}", email))
             );
         } else {
             println!(
                 "{}",
-                display::style_warn("⚠️  No credentials stored. Use `kakaocli login --email ... --password ...`")
+                display::style_warn("⚠️ 저장된 인증 정보가 없습니다. `kakaocli login --email ... --password ...`로 저장하세요.")
             );
         }
         return Ok(());
     }
 
     if let (Some(e), Some(p)) = (email, password) {
-        kakaocli_auth::store_credentials(e, p).map_err(|e| format!("Failed to store: {}", e))?;
+        kakaocli_auth::store_credentials(e, p).map_err(|e| format!("저장 실패: {}", e))?;
         println!(
             "{}",
-            display::style_success(&format!("✅ Credentials stored for: {}", e))
+            display::style_success(&format!("✅ 인증 정보를 저장했습니다: {}", e))
         );
         return Ok(());
     }
 
-    not_implemented_yet("interactive login (use --email + --password)");
+    not_implemented_yet("대화형 로그인 (--email + --password 사용)");
 }
 
 fn cmd_not_implemented(feature: &str) -> Result<(), String> {
-    Err(format!("Not implemented: {}. See docs/roadmap.md for timeline.", feature))
+    Err(format!("미구현: {}. 일정은 docs/roadmap.md 참고.", feature))
 }
 
 // ── Since parser ────────────────────────────────────────────

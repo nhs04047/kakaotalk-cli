@@ -108,7 +108,7 @@ fn sender_cell(msg: &Message) -> Cell {
 }
 
 fn message_cell(text: &str, highlight: bool) -> Cell {
-    let cell = Cell::new(truncate(text, 300));
+    let cell = Cell::new(truncate(text, 120));
     if highlight && color_enabled() {
         cell.fg(Color::Yellow).add_attribute(Attribute::Bold)
     } else {
@@ -176,7 +176,7 @@ pub fn print_chats(chats: &[Chat]) {
     }
 
     println!("{table}");
-    println!("{}", style_dim(&format!("{} chats", chats.len())));
+    println!("{}", style_dim(&format!("채팅방 {}개", chats.len())));
 }
 
 // ── Messages ────────────────────────────────────────────────
@@ -203,6 +203,7 @@ pub fn print_messages(messages: &[Message], chat_name: &str) {
         ]);
     }
     println!("{table}");
+    println!("{}", style_dim(&format!("메시지 {}개", messages.len())));
 }
 
 /// Print a slice of messages with a title.
@@ -224,7 +225,7 @@ pub fn print_messages_slice(messages: &[&Message], title: &str) {
         ]);
     }
     println!("{table}");
-    println!("{}", style_dim(&format!("{} results", messages.len())));
+    println!("{}", style_dim(&format!("결과 {}건", messages.len())));
 }
 
 /// Print search results for messages, highlighting keyword hits.
@@ -251,7 +252,7 @@ pub fn print_search_messages(messages: &[Message], keyword: &str) {
         ]);
     }
     println!("{table}");
-    println!("{}", style_dim(&format!("{} results", messages.len())));
+    println!("{}", style_dim(&format!("결과 {}건", messages.len())));
 }
 
 /// Print combined search results.
@@ -316,15 +317,75 @@ pub fn print_friends(friends: &[Friend]) {
         table.add_row(vec![Cell::new((i + 1).to_string()), Cell::new(name)]);
     }
     println!("{table}");
-    println!("{}", style_dim(&format!("{} friends", friends.len())));
+    println!("{}", style_dim(&format!("친구 {}명", friends.len())));
 }
 
-/// Format a Unix timestamp to a human-readable time string.
+/// Format a Unix timestamp to a human-readable time string in the local timezone.
 fn format_timestamp(ts: i64) -> String {
-    let dt = chrono::DateTime::from_timestamp(ts, 0);
-    match dt {
-        Some(dt) => dt.format("%m-%d %H:%M").to_string(),
+    match chrono::DateTime::from_timestamp(ts, 0) {
+        Some(dt) => dt
+            .with_timezone(&chrono::Local)
+            .format("%m-%d %H:%M")
+            .to_string(),
         None => ts.to_string(),
+    }
+}
+
+/// Render a `query` result: a table when it's a non-empty array of objects,
+/// otherwise pretty-printed JSON. Used for human (non-`--json`) output.
+pub fn print_query_result(value: &serde_json::Value) {
+    let rows = match value.as_array() {
+        Some(rows) if !rows.is_empty() && rows.iter().all(|r| r.is_object()) => rows,
+        _ => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+            );
+            return;
+        }
+    };
+
+    // Column order = keys of the first row, then any extra keys appended.
+    let mut columns: Vec<String> = Vec::new();
+    for row in rows {
+        if let Some(obj) = row.as_object() {
+            for key in obj.keys() {
+                if !columns.iter().any(|c| c == key) {
+                    columns.push(key.clone());
+                }
+            }
+        }
+    }
+
+    let header_refs: Vec<&str> = columns.iter().map(String::as_str).collect();
+    let mut table = new_table(&header_refs);
+    for row in rows {
+        let obj = row.as_object();
+        let cells: Vec<Cell> = columns
+            .iter()
+            .map(|col| {
+                let text = obj
+                    .and_then(|o| o.get(col))
+                    .map(json_cell_text)
+                    .unwrap_or_default();
+                Cell::new(truncate(&text, 120))
+            })
+            .collect();
+        table.add_row(cells);
+    }
+
+    println!("{table}");
+    println!("{}", style_dim(&format!("{}행", rows.len())));
+}
+
+/// A scalar JSON value as a compact cell string (objects/arrays fall back to JSON).
+fn json_cell_text(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Null => "-".to_string(),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        other => other.to_string(),
     }
 }
 
