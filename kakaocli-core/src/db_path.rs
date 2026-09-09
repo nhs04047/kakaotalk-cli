@@ -43,35 +43,127 @@ pub fn mac_db_files() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// macOS: extract user ID from FSChatWindowTransparency preferences plist
+/// macOS: extract user ID from KakaoTalk preferences plist (kakaocli 방식)
 ///
-/// KakaoTalk stores user ID in:
-///   ~/Library/Preferences/com.kakao.KakaoTalkMac.plist
-/// Key: `FSChatWindowTransparency` → value format: `"ChatRoom_<userId>_..."`
+/// KakaoTalk stores user ID in the container-scoped preferences plist.
+/// Multiple extraction strategies are tried in order:
+/// 1. FSChatWindowTransparency 공통 접미사 (키 이름에서 추출)
+/// 2. Direct key lookup (userId, user_id, KAKAO_USER_ID, userID)
+/// 3. NSWindow Frame FSChatWindowFrame_ 공통 접미사
 pub fn mac_user_id() -> Option<u64> {
-    let prefs_path = {
-        let home = std::env::var("HOME").ok()?;
-        PathBuf::from(home)
-            .join("Library/Preferences/com.kakao.KakaoTalkMac.plist")
-    };
+    // 1. Find the right plist — container plist preferred (may have hex suffix)
+    let plist_candidates = vec![
+        mac_container_user_prefs_path(),
+        mac_global_prefs_path(),
+    ];
 
-    if !prefs_path.exists() {
-        return None;
-    }
+    for plist_path in plist_candidates {
+        if !plist_path.exists() {
+            continue;
+        }
 
-    // Parse binary plist with `plist` crate
-    let plist_value: plist::Value = plist::from_file(&prefs_path).ok()?;
-    let dict = plist_value.into_dictionary()?;
-    let transparency_key = dict.get("FSChatWindowTransparency")?;
+        let plist_value: plist::Value = plist::from_file(&plist_path).ok()?;
+        let dict = plist_value.into_dictionary()?;
 
-    if let Some(s) = transparency_key.as_string() {
-        // Format: "ChatRoom_123456_..."
-        if let Some(id_part) = s.split('_').nth(1) {
-            return id_part.parse::<u64>().ok();
+        // Strategy 1: FSChatWindowTransparency 공통 접미사
+        let transparency_prefix = "FSChatWindowTransparency";
+        let fs_chat_keys: Vec<&str> = dict.keys()
+            .filter(|k| k.starts_with(transparency_prefix))
+            .map(|k| k.as_str())
+            .collect();
+        if fs_chat_keys.len() >= 2 {
+            let suffixes: Vec<&str> = fs_chat_keys.iter()
+                .map(|k| &k[transparency_prefix.len()..])
+                .collect();
+            if let Some(common) = longest_common_suffix(&suffixes) {
+                if let Ok(id) = common.parse::<u64>() {
+                    return Some(id);
+                }
+            }
+        }
+
+        // Strategy 2: Direct key lookup
+        let candidate_keys = ["userId", "user_id", "KAKAO_USER_ID", "userID"];
+        for key in &candidate_keys {
+            if let Some(val) = dict.get(*key) {
+                if let Some(n) = val.as_unsigned_integer() {
+                    if n > 0 {
+                        return Some(n);
+                    }
+                }
+                if let Some(s) = val.as_string() {
+                    if let Ok(n) = s.parse::<u64>() {
+                        return Some(n);
+                    }
+                }
+            }
+        }
+
+        // Strategy 3: NSWindow Frame FSChatWindowFrame_ 공통 접미사
+        let frame_prefix = "NSWindow Frame FSChatWindowFrame_";
+        let frame_keys: Vec<&str> = dict.keys()
+            .filter(|k| k.starts_with(frame_prefix))
+            .map(|k| k.as_str())
+            .collect();
+        if frame_keys.len() >= 2 {
+            let suffixes: Vec<&str> = frame_keys.iter()
+                .map(|k| &k[frame_prefix.len()..])
+                .collect();
+            if let Some(common) = longest_common_suffix(&suffixes) {
+                if let Ok(id) = common.parse::<u64>() {
+                    return Some(id);
+                }
+            }
         }
     }
 
     None
+}
+
+/// 컨테이너 내부의 사용자 preferences plist 경로 (hex-suffix plist 우선)
+fn mac_container_user_prefs_path() -> PathBuf {
+    let container = mac_container_path(); // .../Data/
+    let prefs_dir = container.join("Library/Preferences");
+    if let Ok(entries) = std::fs::read_dir(&prefs_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if let Some(name_str) = name.to_str() {
+                if name_str.starts_with("com.kakao.KakaoTalkMac.")
+                    && name_str.ends_with(".plist")
+                    && name_str != "com.kakao.KakaoTalkMac.plist"
+                {
+                    return prefs_dir.join(name_str);
+                }
+            }
+        }
+    }
+    // Fallback: hex-suffix plist 없으면 기본
+    prefs_dir.join("com.kakao.KakaoTalkMac.plist")
+}
+
+/// 글로벌 preferences plist 경로
+fn mac_global_prefs_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/Shared".into());
+    PathBuf::from(home).join("Library/Preferences/com.kakao.KakaoTalkMac.plist")
+}
+
+/// 문자열 배열의 공통 접미사 찾기
+fn longest_common_suffix(strings: &[&str]) -> Option<String> {
+    let first = strings.first()?;
+    let reversed: Vec<String> = strings.iter().map(|s| s.chars().rev().collect()).collect();
+    let mut common_len = 0usize;
+    'outer: for (i, ch) in reversed[0].char_indices() {
+        for r in &reversed[1..] {
+            if r.chars().nth(i) != Some(ch) {
+                break 'outer;
+            }
+        }
+        common_len = i + 1; // char_indices is 0-based, but we want 1-based count
+    }
+    if common_len == 0 {
+        return None;
+    }
+    Some(first[first.len() - common_len..].to_string())
 }
 
 /// macOS: get platform UUID from IOPlatformExpertDevice (ioreg)
