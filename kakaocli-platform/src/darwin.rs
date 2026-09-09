@@ -9,9 +9,9 @@ use kakaocli_core::db_path;
 use kakaocli_core::model::DbKey;
 
 use accessibility::AXAttribute;
-use accessibility::AXUIElement;
-
+use core_foundation::boolean::CFBoolean;
 use core_foundation::string::CFString;
+use core_foundation::base::TCFType;
 
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, KeyCode};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
@@ -87,8 +87,6 @@ impl PlatformBackend for DarwinBackend {
 
         let main_window = get_main_window(&app)
             .ok_or_else(|| PlatformError::Other("Cannot find KakaoTalk main window".into()))?;
-
-        // Paywall dismissal deferred to Phase 2 (AXSize not in accessibility 0.2)
 
         let chat_list = get_chat_list_role(&main_window)
             .ok_or_else(|| PlatformError::Other("Cannot find chat list in main window".into()))?;
@@ -189,11 +187,11 @@ fn check_login_interruption() -> Result<(), PlatformError> {
         Some(w) => w,
         None => return Ok(()),
     };
-    if let Ok(title_val) = mw.attribute(&AXAttribute::title()) {
-        if let Some(title) = title_val.as_string() {
-            if title.contains("Log in") || title.contains("Login") {
-                return Err(PlatformError::NotLoggedIn);
-            }
+    // AXAttribute::title() returns CFString → .to_string()
+    if let Ok(title) = mw.attribute(&AXAttribute::title()) {
+        let title_str: String = title.to_string();
+        if title_str.contains("Log in") || title_str.contains("Login") {
+            return Err(PlatformError::NotLoggedIn);
         }
     }
     Ok(())
@@ -226,25 +224,32 @@ fn get_kakaotalk_ax_app() -> Option<accessibility::AXUIElement> {
 }
 
 fn get_main_window(app: &accessibility::AXUIElement) -> Option<accessibility::AXUIElement> {
-    let windows_val = app.attribute(&AXAttribute::windows()).ok()?;
-    let windows = windows_val.as_array()?;
+    // AXAttribute::windows() returns CFArray<AXUIElement> → can iterate directly
+    let windows = app.attribute(&AXAttribute::windows()).ok()?;
 
-    for window in windows {
-        let ax_window = window.as_axui_element()?;
-        if let Ok(role) = ax_window.attribute(&AXAttribute::role()) {
-            if role.as_string().map(|s| s == "AXApplication").unwrap_or(false) {
+    for window in windows.iter() {
+        // AXAttribute::role() returns CFString → .to_string()
+        if let Ok(role) = window.attribute(&AXAttribute::role()) {
+            let role_str: String = role.to_string();
+            if role_str == "AXApplication" {
                 continue;
             }
         }
+        // Custom attribute: AXIdentifier (returns CFType → must downcast)
         let ident_attr = AXAttribute::new(&CFString::new("AXIdentifier"));
-        if let Ok(id_val) = ax_window.attribute(&ident_attr) {
-            if id_val.as_string().map(|s| s == "Main Window").unwrap_or(false) {
-                return Some(ax_window.clone());
+        if let Ok(id_val) = window.attribute(&ident_attr) {
+            if let Some(id_cfstr) = id_val.downcast::<CFString>() {
+                let id_str: String = id_cfstr.to_string();
+                if id_str == "Main Window" {
+                    return Some(window.clone());
+                }
             }
         }
-        if let Ok(role) = ax_window.attribute(&AXAttribute::role()) {
-            if role.as_string().map(|s| s == "AXWindow").unwrap_or(false) {
-                return Some(ax_window.clone());
+        // Fallback: first AXWindow
+        if let Ok(role) = window.attribute(&AXAttribute::role()) {
+            let role_str: String = role.to_string();
+            if role_str == "AXWindow" {
+                return Some(window.clone());
             }
         }
     }
@@ -260,21 +265,18 @@ fn find_child_by_role(
     parent: &accessibility::AXUIElement,
     roles: &[&str],
 ) -> Option<accessibility::AXUIElement> {
-    let children_val = parent.attribute(&AXAttribute::children()).ok()?;
-    let children = children_val.as_array()?;
+    // AXAttribute::children() returns CFArray<AXUIElement>
+    let children = parent.attribute(&AXAttribute::children()).ok()?;
 
-    for child in children {
-        if let Some(ax_child) = child.as_axui_element() {
-            if let Ok(role) = ax_child.attribute(&AXAttribute::role()) {
-                if let Some(role_str) = role.as_string() {
-                    if roles.contains(&role_str.as_str()) {
-                        return Some(ax_child.clone());
-                    }
-                }
+    for child in children.iter() {
+        if let Ok(role) = child.attribute(&AXAttribute::role()) {
+            let role_str: String = role.to_string();
+            if roles.contains(&role_str.as_str()) {
+                return Some(child.clone());
             }
-            if let Some(found) = find_child_by_role(&ax_child, roles) {
-                return Some(found);
-            }
+        }
+        if let Some(found) = find_child_by_role(&child, roles) {
+            return Some(found);
         }
     }
 
@@ -325,11 +327,11 @@ fn find_self_chat_row(
 ) -> Result<accessibility::AXUIElement, PlatformError> {
     let rows = get_visible_rows(chat_list)?;
     for row in &rows {
+        // AXAttribute::description() returns CFString
         if let Ok(desc) = row.attribute(&AXAttribute::description()) {
-            if let Some(s) = desc.as_string() {
-                if s.contains("badge me") || s.contains("Self-chat") || s.contains("Notes") {
-                    return Ok(row.clone());
-                }
+            let desc_str: String = desc.to_string();
+            if desc_str.contains("badge me") || desc_str.contains("Self-chat") || desc_str.contains("Notes") {
+                return Ok(row.clone());
             }
         }
     }
@@ -345,17 +347,11 @@ fn row_name_matches(row_name: &str, query: &str) -> bool {
 fn get_visible_rows(
     chat_list: &accessibility::AXUIElement,
 ) -> Result<Vec<accessibility::AXUIElement>, PlatformError> {
-    let children_val = chat_list
+    let children = chat_list
         .attribute(&AXAttribute::children())
         .map_err(|_| PlatformError::Other("Cannot get chat list children".into()))?;
-    let arr = children_val
-        .as_array()
-        .ok_or_else(|| PlatformError::Other("Chat list children is not an array".into()))?;
 
-    let rows: Vec<accessibility::AXUIElement> = arr
-        .iter()
-        .filter_map(|v| v.as_axui_element().cloned())
-        .collect();
+    let rows: Vec<accessibility::AXUIElement> = children.iter().collect();
 
     Ok(rows)
 }
@@ -381,25 +377,25 @@ fn scroll_down_cg() -> Result<(), PlatformError> {
 
 fn get_row_display_name(row: &accessibility::AXUIElement) -> Option<String> {
     if let Ok(desc) = row.attribute(&AXAttribute::description()) {
-        if let Some(s) = desc.as_string() {
-            if !s.is_empty() && !s.contains("badge") {
-                return Some(s);
-            }
+        let s: String = desc.to_string();
+        if !s.is_empty() && !s.contains("badge") {
+            return Some(s);
         }
     }
+    // Custom attribute: AXLabel (CFType → downcast)
     let label_attr = AXAttribute::new(&CFString::new("AXLabel"));
     if let Ok(label) = row.attribute(&label_attr) {
-        if let Some(s) = label.as_string() {
+        if let Some(label_cfstr) = label.downcast::<CFString>() {
+            let s: String = label_cfstr.to_string();
             if !s.is_empty() {
                 return Some(s);
             }
         }
     }
     if let Ok(title) = row.attribute(&AXAttribute::title()) {
-        if let Some(s) = title.as_string() {
-            if !s.is_empty() {
-                return Some(s);
-            }
+        let s: String = title.to_string();
+        if !s.is_empty() {
+            return Some(s);
         }
     }
     None
@@ -424,29 +420,23 @@ fn verify_chat_window(expected_name: &str) -> Result<(), PlatformError> {
     let app = get_kakaotalk_ax_app()
         .ok_or_else(|| PlatformError::Other("KakaoTalk closed unexpectedly".into()))?;
 
-    let windows_val = app
+    let windows = app
         .attribute(&AXAttribute::windows())
         .map_err(|_| PlatformError::UiError("Cannot list windows".into()))?;
-    let windows = windows_val
-        .as_array()
-        .ok_or_else(|| PlatformError::UiError("Windows is not an array".into()))?;
 
-    for w in windows {
-        if let Some(ax_w) = w.as_axui_element() {
-            if let Ok(title_val) = ax_w.attribute(&AXAttribute::title()) {
-                if let Some(title) = title_val.as_string() {
-                    if title.is_empty() || title == "KakaoTalk" {
-                        continue;
-                    }
-                    if title.contains(expected_name) || expected_name.contains(&title) {
-                        return Ok(());
-                    }
-                    return Err(PlatformError::ChatVerificationFailed {
-                        expected: expected_name.to_string(),
-                        actual: title,
-                    });
-                }
+    for w in windows.iter() {
+        if let Ok(title) = w.attribute(&AXAttribute::title()) {
+            let title_str: String = title.to_string();
+            if title_str.is_empty() || title_str == "KakaoTalk" {
+                continue;
             }
+            if title_str.contains(expected_name) || expected_name.contains(&title_str) {
+                return Ok(());
+            }
+            return Err(PlatformError::ChatVerificationFailed {
+                expected: expected_name.to_string(),
+                actual: title_str,
+            });
         }
     }
 
@@ -523,25 +513,6 @@ fn press_cmd_w() -> Result<(), PlatformError> {
     Ok(())
 }
 
-fn press_escape() -> Result<(), PlatformError> {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-        .map_err(|e| PlatformError::UiError(format!("Cannot create source: {:?}", e)))?;
-
-    let event = CGEvent::new_keyboard_event(source.clone(), KeyCode::ESCAPE, true)
-        .map_err(|e| PlatformError::UiError(format!("Cannot create event: {:?}", e)))?;
-    event.post(CGEventTapLocation::HID);
-
-    std::thread::sleep(std::time::Duration::from_millis(100));
-
-    let source2 = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-        .map_err(|e| PlatformError::UiError(format!("Cannot create source: {:?}", e)))?;
-    let event_up = CGEvent::new_keyboard_event(source2, KeyCode::ESCAPE, false)
-        .map_err(|e| PlatformError::UiError(format!("Cannot create event: {:?}", e)))?;
-    event_up.post(CGEventTapLocation::HID);
-
-    Ok(())
-}
-
 // ── AX tree dump (inspect command) ──────────────────────────
 
 fn ax_build_tree(element: &accessibility::AXUIElement, max_depth: u32) -> AxNode {
@@ -553,35 +524,36 @@ fn ax_build_tree(element: &accessibility::AXUIElement, max_depth: u32) -> AxNode
         };
     }
 
-    let role = element
+    let role: String = element
         .attribute(&AXAttribute::role())
         .ok()
-        .and_then(|v| v.as_string().map(|s| s.to_string()))
+        .map(|v: CFString| v.to_string())
         .unwrap_or_default();
 
-    let title = element
+    let title: String = element
         .attribute(&AXAttribute::title())
         .ok()
-        .and_then(|v| v.as_string().map(|s| s.to_string()))
+        .map(|v: CFString| v.to_string())
         .unwrap_or_default();
 
-    let desc = element
+    let desc: String = element
         .attribute(&AXAttribute::description())
         .ok()
-        .and_then(|v| v.as_string().map(|s| s.to_string()))
+        .map(|v: CFString| v.to_string())
         .unwrap_or_default();
 
-    let focused = element
+    let focused: bool = element
         .attribute(&AXAttribute::focused())
         .ok()
-        .and_then(|v| v.as_bool())
+        .map(|v: CFBoolean| bool::from(v))
         .unwrap_or(false);
 
-    let selected_attr = AXAttribute::new(&CFString::new("AXSelected"));
+    // Custom attribute: AXSelected (returns CFType → downcast)
     let selected = element
-        .attribute(&selected_attr)
+        .attribute(&AXAttribute::new(&CFString::new("AXSelected")))
         .ok()
-        .and_then(|v| v.as_bool())
+        .and_then(|v| v.downcast::<CFBoolean>())
+        .map(|v| bool::from(v))
         .unwrap_or(false);
 
     let mut node = AxNode {
@@ -593,13 +565,9 @@ fn ax_build_tree(element: &accessibility::AXUIElement, max_depth: u32) -> AxNode
         children: Vec::new(),
     };
 
-    if let Ok(children_val) = element.attribute(&AXAttribute::children()) {
-        if let Some(arr) = children_val.as_array() {
-            for child in arr.iter().take(50) {
-                if let Some(child_el) = child.as_axui_element() {
-                    node.children.push(ax_build_tree(child_el, max_depth - 1));
-                }
-            }
+    if let Ok(children) = element.attribute(&AXAttribute::children()) {
+        for child in children.iter().take(50) {
+            node.children.push(ax_build_tree(&child, max_depth - 1));
         }
     }
 
