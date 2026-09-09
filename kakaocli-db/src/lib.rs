@@ -74,10 +74,13 @@ impl Database {
                 }
             };
 
-            // Set compatibility mode and key atomically (passphrase mode, kakaocli Swift compatible)
+            // Set key FIRST, then cipher_compatibility — SQLCipher derives the key
+            // using the compatibility mode active at key-set time. If compat is
+            // set before key, SQLCipher uses its own default (v4: 256000/SHA512)
+            // instead of KakaoTalk's v3 (64000/SHA1) → "file is not a database".
             let pragma_sql = format!(
-                "PRAGMA cipher_compatibility = {}; PRAGMA key = '{}';",
-                compat, key_hex
+                "PRAGMA key = '{}'; PRAGMA cipher_compatibility = {};",
+                key_hex, compat
             );
 
             if let Err(_e) = conn.execute_batch(&pragma_sql) {
@@ -454,6 +457,27 @@ mod tests {
         let result = Database::open(&tmp, &"z".repeat(256), 0);
         let _ = std::fs::remove_file(&tmp);
         assert!(matches!(result, Err(DbError::DatabaseOpenFailed(_))));
+    }
+
+    #[test]
+    fn test_pragma_order_key_before_compat() {
+        // PRAGMA 순서: key를 반드시 compat보다 먼저.
+        // SQLCipher는 key 설정 시점의 compat로 키를 파생하므로,
+        // compat를 먼저 주면 v4 기본값(256000/SHA512)이 적용되어
+        // 카카오톡 v3 DB(64000/SHA1)를 열 수 없다.
+        let key_hex = "a".repeat(256);
+        let compat = 3;
+        let pragma_sql = format!(
+            "PRAGMA key = '{}'; PRAGMA cipher_compatibility = {};",
+            key_hex, compat
+        );
+        // key가 앞에 오고 compat가 뒤에 온다
+        let key_pos = pragma_sql.find("PRAGMA key").unwrap();
+        let compat_pos = pragma_sql.find("PRAGMA cipher_compatibility").unwrap();
+        assert!(key_pos < compat_pos, "key must precede cipher_compatibility");
+        // 명시적 파라미터가 포함된다
+        assert!(pragma_sql.contains(&format!("key = '{}'", key_hex)));
+        assert!(pragma_sql.contains("cipher_compatibility = 3"));
     }
 
     #[test]
