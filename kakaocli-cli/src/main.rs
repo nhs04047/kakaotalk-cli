@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use kakaocli_core::model::*;
 use kakaocli_db::Database;
+use std::io::IsTerminal;
+use std::time::Duration;
 
 mod display;
 
@@ -59,9 +61,9 @@ enum Command {
     /// 메시지 조회
     #[command(aliases = ["messages"])]
     Msg {
-        /// 채팅방 이름 (부분일치)
+        /// 채팅방 이름 (부분일치, 생략 시 인터랙티브 선택)
         #[arg(long)]
-        chat: String,
+        chat: Option<String>,
 
         /// 시간 범위 (예: 1h, 30m, 7d, 2026-09-07)
         #[arg(long)]
@@ -106,14 +108,19 @@ enum Command {
     /// 메시지 전송 (Phase 2)
     #[command(aliases = ["say"])]
     Send {
-        chat: String,
-        message: String,
+        /// 채팅방 이름 (생략 시 인터랙티브 선택)
+        chat: Option<String>,
+        /// 보낼 메시지 (생략 시 인터랙티브 입력)
+        message: Option<String>,
         /// 나와의 채팅으로 전송
         #[arg(long)]
         me: bool,
         /// 미리보기 (전송 안 함)
         #[arg(long)]
         dry_run: bool,
+        /// 확인 프롬프트 없이 즉시 전송
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 
     /// AX 트리 덤프 (디버깅용, macOS only)
@@ -167,13 +174,15 @@ fn main() {
         Command::Check { .. } => cmd_check(&cli),
         Command::Auth { verbose } => cmd_auth(&cli, *verbose),
         Command::Chats { limit } => cmd_chats(&cli, *limit),
-        Command::Msg { chat, since, limit } => cmd_messages(&cli, chat, since.as_deref(), *limit),
+        Command::Msg { chat, since, limit } => {
+            cmd_messages(&cli, chat.as_deref(), since.as_deref(), *limit)
+        }
         Command::Find { keyword, exact, regex, rooms, friends, all } => {
             cmd_find(&cli, keyword, *exact, *regex, *rooms, *friends, *all)
         }
         Command::Query { sql } => cmd_query(&cli, sql),
-        Command::Send { chat , message , me , dry_run  } => {
-            cmd_send(&cli, chat, message, *me, *dry_run)
+        Command::Send { chat, message, me, dry_run, yes } => {
+            cmd_send(&cli, chat.as_deref(), message.as_deref(), *me, *dry_run, *yes)
         }
         Command::Sync { .. } => cmd_not_implemented("sync (Phase 4)"),
         Command::Inspect { chat, depth } => cmd_inspect(&cli, chat.as_deref(), *depth),
@@ -183,7 +192,7 @@ fn main() {
     };
 
     if let Err(err) = result {
-        eprintln!("Error: {}", err);
+        eprintln!("{}", display::style_err(&format!("Error: {}", err)));
         std::process::exit(1);
     }
 }
@@ -222,6 +231,59 @@ fn open_db(cli: &Cli) -> Result<Database, String> {
     Ok(db)
 }
 
+/// Run `f` while showing an indicatif spinner on stderr (only when attached
+/// to a real terminal — e.g. userId SHA-512 역산 can take a minute or two).
+fn with_spinner<T>(message: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let pb = std::io::stderr().is_terminal().then(|| {
+        let pb = indicatif::ProgressBar::new_spinner();
+        let style = indicatif::ProgressStyle::with_template("{spinner:.cyan} {msg}")
+            .unwrap_or_else(|_| indicatif::ProgressStyle::default_spinner());
+        pb.set_style(style);
+        pb.enable_steady_tick(Duration::from_millis(100));
+        pb.set_message(message.to_string());
+        pb
+    });
+
+    let result = f();
+
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
+
+    result
+}
+
+/// A chat wrapped for display in an `inquire::Select` prompt.
+struct ChatChoice(Chat);
+
+impl std::fmt::Display for ChatChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.unread_count > 0 {
+            write!(f, "{} ({})", self.0.display_name, self.0.unread_count)
+        } else {
+            write!(f, "{}", self.0.display_name)
+        }
+    }
+}
+
+/// Interactively pick a chat room from the DB's chat list.
+fn pick_chat_interactive(db: &Database) -> Result<(i64, String), String> {
+    let chats = db
+        .list_chats(200)
+        .map_err(|e| format!("Failed to list chats: {}", e))?;
+
+    if chats.is_empty() {
+        return Err("표시할 채팅방이 없습니다.".to_string());
+    }
+
+    let choices: Vec<ChatChoice> = chats.into_iter().map(ChatChoice).collect();
+    let selected = inquire::Select::new("채팅방을 선택하세요:", choices)
+        .prompt()
+        .map_err(|e| format!("채팅방 선택이 취소되었습니다: {}", e))?;
+
+    Ok((selected.0.id, selected.0.display_name))
+}
+
 // ── Commands ───────────────────────────────────────────────
 
 fn cmd_check(cli: &Cli) -> Result<(), String> {
@@ -236,10 +298,18 @@ fn cmd_check(cli: &Cli) -> Result<(), String> {
     match kakaocli_platform::Platform::check_status() {
         Ok(status) => {
             let status_str = match &status {
-                kakaocli_platform::AppStatus::Ready => "✅ Ready (app running + DB accessible)",
-                kakaocli_platform::AppStatus::LoggedOut => "⚠️  App running but not logged in",
-                kakaocli_platform::AppStatus::NotRunning => "⚠️  KakaoTalk not running",
-                kakaocli_platform::AppStatus::DbAccessible => "✅ DB accessible (app not running)",
+                kakaocli_platform::AppStatus::Ready => {
+                    display::style_success("✅ Ready (app running + DB accessible)")
+                }
+                kakaocli_platform::AppStatus::LoggedOut => {
+                    display::style_warn("⚠️  App running but not logged in")
+                }
+                kakaocli_platform::AppStatus::NotRunning => {
+                    display::style_warn("⚠️  KakaoTalk not running")
+                }
+                kakaocli_platform::AppStatus::DbAccessible => {
+                    display::style_success("✅ DB accessible (app not running)")
+                }
             };
             println!("{}", status_str);
 
@@ -256,12 +326,14 @@ fn cmd_check(cli: &Cli) -> Result<(), String> {
 }
 
 fn cmd_auth(cli: &Cli, verbose: bool) -> Result<(), String> {
-
-    // Verify DB can be opened
-    let db = open_db(cli)?;
+    // Verify DB can be opened (may trigger a slow userId SHA-512 역산 on macOS)
+    let db = with_spinner(
+        "DB 키 확인 중... (userId 역산이 필요하면 최대 1~2분 소요될 수 있습니다)",
+        || open_db(cli),
+    )?;
     let tables = db.verify_tables().map_err(|e| format!("Verify failed: {}", e))?;
 
-    println!("✅ Database opened successfully!");
+    println!("{}", display::style_success("✅ Database opened successfully!"));
     println!("   Tables found: {}", tables.len());
 
     if verbose || cli.verbose {
@@ -286,14 +358,17 @@ fn cmd_chats(cli: &Cli, limit: u32) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_messages(cli: &Cli, chat: &str, since: Option<&str>, limit: u32) -> Result<(), String> {
+fn cmd_messages(cli: &Cli, chat: Option<&str>, since: Option<&str>, limit: u32) -> Result<(), String> {
     let db = open_db(cli)?;
 
-    // Resolve chat name to chat ID
-    let (chat_id, chat_name) = db
-        .resolve_chat_id(chat)
-        .map_err(|e| format!("Chat lookup failed: {}", e))?
-        .ok_or_else(|| format!("Chat '{}' not found", chat))?;
+    // Resolve chat name to chat ID (interactive pick when omitted)
+    let (chat_id, chat_name) = match chat {
+        Some(name) => db
+            .resolve_chat_id(name)
+            .map_err(|e| format!("Chat lookup failed: {}", e))?
+            .ok_or_else(|| format!("Chat '{}' not found", name))?,
+        None => pick_chat_interactive(&db)?,
+    };
 
     // Parse since
     let since_ts = parse_since(since);
@@ -413,20 +488,72 @@ fn cmd_inspect(cli: &Cli, chat: Option<&str>, depth: u32) -> Result<(), String> 
     Ok(())
 }
 
-fn cmd_send(_cli: &Cli, chat_name: &str, text: &str, me: bool, dry_run: bool) -> Result<(), String> {
-    let target_name = if me { "_" } else { chat_name };
+fn cmd_send(
+    cli: &Cli,
+    chat_name: Option<&str>,
+    text: Option<&str>,
+    me: bool,
+    dry_run: bool,
+    yes: bool,
+) -> Result<(), String> {
+    // Resolve target chat (interactive pick when omitted and not sending to self)
+    let target_name = if me {
+        "_".to_string()
+    } else {
+        match chat_name {
+            Some(name) => name.to_string(),
+            None => {
+                let db = open_db(cli)?;
+                pick_chat_interactive(&db)?.1
+            }
+        }
+    };
+
+    let text = match text {
+        Some(t) => t.to_string(),
+        None => inquire::Text::new("보낼 메시지:")
+            .prompt()
+            .map_err(|e| format!("메시지 입력이 취소되었습니다: {}", e))?,
+    };
 
     if dry_run {
-        println!("🔍 Dry-run: would send to '{}': {}", target_name, text);
+        println!(
+            "{}",
+            display::style_dim(&format!(
+                "🔍 Dry-run: would send to '{}': {}",
+                target_name, text
+            ))
+        );
         return Ok(());
+    }
+
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            return Err("비대화형 환경에서는 --yes(-y) 플래그가 필요합니다.".to_string());
+        }
+        let proceed = inquire::Confirm::new(&format!(
+            "'{}'에 메시지를 보낼까요?\n> {}",
+            target_name, text
+        ))
+        .with_default(false)
+        .prompt()
+        .map_err(|e| format!("전송 확인이 취소되었습니다: {}", e))?;
+
+        if !proceed {
+            println!("{}", display::style_warn("전송이 취소되었습니다."));
+            return Ok(());
+        }
     }
 
     use kakaocli_platform::PlatformBackend;
 
-    kakaocli_platform::Platform::send_message(target_name, text)
+    kakaocli_platform::Platform::send_message(&target_name, &text)
         .map_err(|e| format!("Send failed: {}", e))?;
 
-    println!("✅ Message sent to '{}'", target_name);
+    println!(
+        "{}",
+        display::style_success(&format!("✅ Message sent to '{}'", target_name))
+    );
     Ok(())
 }
 
@@ -440,16 +567,25 @@ fn cmd_login(_cli: &Cli, email: Option<&str>, password: Option<&str>, status: bo
     if status {
         if kakaocli_auth::has_credentials() {
             let (email, _) = kakaocli_auth::get_credentials().map_err(|e| format!("Failed to read: {}", e))?;
-            println!("✅ Credentials stored for: {}", email);
+            println!(
+                "{}",
+                display::style_success(&format!("✅ Credentials stored for: {}", email))
+            );
         } else {
-            println!("⚠️  No credentials stored. Use `kakaocli login --email ... --password ...`");
+            println!(
+                "{}",
+                display::style_warn("⚠️  No credentials stored. Use `kakaocli login --email ... --password ...`")
+            );
         }
         return Ok(());
     }
 
     if let (Some(e), Some(p)) = (email, password) {
         kakaocli_auth::store_credentials(e, p).map_err(|e| format!("Failed to store: {}", e))?;
-        println!("✅ Credentials stored for: {}", e);
+        println!(
+            "{}",
+            display::style_success(&format!("✅ Credentials stored for: {}", e))
+        );
         return Ok(());
     }
 

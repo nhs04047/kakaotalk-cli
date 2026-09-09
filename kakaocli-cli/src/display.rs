@@ -3,141 +3,320 @@
 use kakaocli_core::model::*;
 use kakaocli_platform::AxNode;
 
+use comfy_table::{
+    modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, Attribute, Cell, Color, ContentArrangement,
+    Table,
+};
+use owo_colors::OwoColorize;
 use std::fmt::Write as FmtWrite;
+use std::io::IsTerminal;
+
+// ── Color / style helpers ─────────────────────────────────
+
+/// Whether ANSI colors should be emitted: respects `NO_COLOR` and only
+/// colors when stdout is an actual terminal (not a pipe/file).
+pub(crate) fn color_enabled() -> bool {
+    std::env::var_os("NO_COLOR").is_none() && std::io::stdout().is_terminal()
+}
+
+pub(crate) fn style_header(s: &str) -> String {
+    if color_enabled() {
+        s.cyan().bold().to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+pub(crate) fn style_success(s: &str) -> String {
+    if color_enabled() {
+        s.green().bold().to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+pub(crate) fn style_warn(s: &str) -> String {
+    if color_enabled() {
+        s.yellow().to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+pub(crate) fn style_dim(s: &str) -> String {
+    if color_enabled() {
+        s.dimmed().to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+pub(crate) fn style_err(s: &str) -> String {
+    if color_enabled() {
+        s.red().bold().to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+// ── Table helpers ──────────────────────────────────────────
+
+fn header_cell(text: &str) -> Cell {
+    let cell = Cell::new(text);
+    if color_enabled() {
+        cell.fg(Color::Cyan).add_attribute(Attribute::Bold)
+    } else {
+        cell
+    }
+}
+
+fn new_table(headers: &[&str]) -> Table {
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .apply_modifier(UTF8_ROUND_CORNERS)
+        .set_content_arrangement(ContentArrangement::Dynamic);
+    table.set_header(headers.iter().map(|h| header_cell(h)));
+    table
+}
+
+fn time_cell(text: impl std::fmt::Display) -> Cell {
+    let cell = Cell::new(text.to_string());
+    if color_enabled() {
+        cell.fg(Color::DarkGrey)
+    } else {
+        cell
+    }
+}
+
+fn sender_cell(msg: &Message) -> Cell {
+    let name = msg.sender_name.as_deref().unwrap_or("(알수없음)");
+    let label = if msg.is_from_me {
+        format!("→ {}", name)
+    } else {
+        name.to_string()
+    };
+    let cell = Cell::new(label);
+    if !color_enabled() {
+        return cell;
+    }
+    if msg.is_from_me {
+        cell.fg(Color::Green).add_attribute(Attribute::Bold)
+    } else {
+        cell.fg(Color::Blue)
+    }
+}
+
+fn message_cell(text: &str, highlight: bool) -> Cell {
+    let cell = Cell::new(truncate(text, 300));
+    if highlight && color_enabled() {
+        cell.fg(Color::Yellow).add_attribute(Attribute::Bold)
+    } else {
+        cell
+    }
+}
+
+fn unread_cell(count: i32) -> Cell {
+    if count <= 0 {
+        return Cell::new("-");
+    }
+    let cell = Cell::new(count.to_string());
+    if color_enabled() {
+        cell.fg(Color::Yellow).add_attribute(Attribute::Bold)
+    } else {
+        cell
+    }
+}
+
+fn chat_type_label(t: &ChatType) -> String {
+    match t {
+        ChatType::Direct => "1:1".to_string(),
+        ChatType::Group => "그룹".to_string(),
+        ChatType::Open => "오픈채팅".to_string(),
+        ChatType::SelfChat => "나와의채팅".to_string(),
+        ChatType::Unknown(n) => format!("기타({})", n),
+    }
+}
+
+/// Truncate to at most `max_chars` characters, appending `…` if cut.
+fn truncate(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{}…", head)
+    } else {
+        head
+    }
+}
+
+// ── Chats ───────────────────────────────────────────────────
 
 /// Print chat rooms in a table.
 pub fn print_chats(chats: &[Chat]) {
     if chats.is_empty() {
-        println!("No chats found.");
+        println!("{}", style_warn("채팅방이 없습니다."));
         return;
     }
 
-    for chat in chats {
-        let unread = if chat.unread_count > 0 {
-            format!(" ({})", chat.unread_count)
-        } else {
-            String::new()
-        };
-        let last_msg = chat.last_message_at.map_or("".to_string(), |ts| {
-            format!(" {}", format_timestamp(ts))
-        });
-        println!("  {}{}{}", chat.display_name, unread, last_msg);
+    let mut table = new_table(&["#", "채팅방", "유형", "인원", "안읽음", "최근 메시지"]);
+
+    for (i, chat) in chats.iter().enumerate() {
+        let last_msg = chat
+            .last_message_at
+            .map_or("-".to_string(), format_timestamp);
+
+        table.add_row(vec![
+            Cell::new((i + 1).to_string()),
+            Cell::new(&chat.display_name),
+            Cell::new(chat_type_label(&chat.chat_type)),
+            Cell::new(chat.member_count.to_string()),
+            unread_cell(chat.unread_count),
+            time_cell(last_msg),
+        ]);
     }
-    println!();
-    println!("{} chats", chats.len());
+
+    println!("{table}");
+    println!("{}", style_dim(&format!("{} chats", chats.len())));
 }
 
-/// Print messages in a readable format.
+// ── Messages ────────────────────────────────────────────────
+
+/// Print messages in a readable table.
 pub fn print_messages(messages: &[Message], chat_name: &str) {
     if messages.is_empty() {
-        println!("No messages in '{}'.", chat_name);
+        println!(
+            "{}",
+            style_warn(&format!("'{}' 채팅방에 메시지가 없습니다.", chat_name))
+        );
         return;
     }
 
-    println!("--- {} ---", chat_name);
+    println!("{}", style_header(&format!("─── {} ───", chat_name)));
 
+    let mut table = new_table(&["시간", "발신자", "메시지"]);
     for msg in messages.iter().rev() {
-        let sender = msg.sender_name.as_deref().unwrap_or("(unknown)");
         let text = msg.text.as_deref().unwrap_or("");
-        let ts = format_timestamp(msg.created_at);
-        let me = if msg.is_from_me { "→" } else { " " };
-
-        if text.len() > 80 {
-            println!("{}{} {}: {}", me, ts, sender, &text[..77]);
-        } else {
-            println!("{}{} {}: {}", me, ts, sender, text);
-        }
+        table.add_row(vec![
+            time_cell(format_timestamp(msg.created_at)),
+            sender_cell(msg),
+            message_cell(text, false),
+        ]);
     }
+    println!("{table}");
 }
 
 /// Print a slice of messages with a title.
 pub fn print_messages_slice(messages: &[&Message], title: &str) {
     if messages.is_empty() {
-        println!("No results for {}.", title);
+        println!("{}", style_warn(&format!("'{}'에 대한 결과가 없습니다.", title)));
         return;
     }
 
-    println!("--- {} ---", title);
+    println!("{}", style_header(&format!("─── {} ───", title)));
+
+    let mut table = new_table(&["시간", "발신자", "메시지"]);
     for msg in messages.iter().rev() {
-        let sender = msg.sender_name.as_deref().unwrap_or("(unknown)");
         let text = msg.text.as_deref().unwrap_or("");
-        let ts = format_timestamp(msg.created_at);
-        let me = if msg.is_from_me { "→" } else { " " };
-        println!("{}{} {}: {}", me, ts, sender, text);
+        table.add_row(vec![
+            time_cell(format_timestamp(msg.created_at)),
+            sender_cell(msg),
+            message_cell(text, false),
+        ]);
     }
-    println!("{} results", messages.len());
+    println!("{table}");
+    println!("{}", style_dim(&format!("{} results", messages.len())));
 }
 
-/// Print search results for messages.
+/// Print search results for messages, highlighting keyword hits.
 pub fn print_search_messages(messages: &[Message], keyword: &str) {
     if messages.is_empty() {
-        println!("No messages matching '{}'.", keyword);
+        println!(
+            "{}",
+            style_warn(&format!("'{}'에 대한 메시지가 없습니다.", keyword))
+        );
         return;
     }
 
-    println!("--- Messages matching '{}' ---", keyword);
+    println!("{}", style_header(&format!("검색: \"{}\"", keyword)));
+
+    let needle = keyword.to_lowercase();
+    let mut table = new_table(&["시간", "발신자", "메시지"]);
     for msg in messages.iter() {
-        let sender = msg.sender_name.as_deref().unwrap_or("(unknown)");
         let text = msg.text.as_deref().unwrap_or("");
-        let ts = format_timestamp(msg.created_at);
-        println!("{} {}: {}", ts, sender, text);
+        let hit = !needle.is_empty() && text.to_lowercase().contains(&needle);
+        table.add_row(vec![
+            time_cell(format_timestamp(msg.created_at)),
+            sender_cell(msg),
+            message_cell(text, hit),
+        ]);
     }
-    println!("{} results", messages.len());
+    println!("{table}");
+    println!("{}", style_dim(&format!("{} results", messages.len())));
 }
 
 /// Print combined search results.
 pub fn print_search_all(results: &SearchResults, keyword: &str) {
+    let mut any = false;
+
     if !results.messages.is_empty() {
-        println!("--- Messages ---");
+        any = true;
+        println!("{}", style_header("메시지"));
+        let mut table = new_table(&["시간", "발신자", "메시지"]);
         for msg in results.messages.iter().take(10) {
-            let sender = msg.sender_name.as_deref().unwrap_or("(unknown)");
             let text = msg.text.as_deref().unwrap_or("");
-            let ts = format_timestamp(msg.created_at);
-            println!("  {} {}: {}", ts, sender, text);
+            table.add_row(vec![
+                time_cell(format_timestamp(msg.created_at)),
+                sender_cell(msg),
+                message_cell(text, false),
+            ]);
         }
+        println!("{table}");
         if results.messages.len() > 10 {
-            println!("  ... and {} more", results.messages.len() - 10);
+            println!(
+                "{}",
+                style_dim(&format!("... 외 {}건", results.messages.len() - 10))
+            );
         }
     }
 
     if !results.rooms.is_empty() {
-        println!("--- Rooms ---");
-        for room in &results.rooms {
-            println!("  {}", room.display_name);
-        }
+        any = true;
+        println!("{}", style_header("채팅방"));
+        print_chats(&results.rooms);
     }
 
     if !results.friends.is_empty() {
-        println!("--- Friends ---");
-        for friend in &results.friends {
-            let name = friend.display_name.as_deref()
-                .or(friend.friend_nick_name.as_deref())
-                .or(friend.nick_name.as_deref())
-                .unwrap_or("(unknown)");
-            println!("  {}", name);
-        }
+        any = true;
+        println!("{}", style_header("친구"));
+        print_friends(&results.friends);
     }
 
-    if results.messages.is_empty() && results.rooms.is_empty() && results.friends.is_empty() {
-        println!("No results for '{}'.", keyword);
+    if !any {
+        println!("{}", style_warn(&format!("'{}'에 대한 결과가 없습니다.", keyword)));
     }
 }
+
+// ── Friends ─────────────────────────────────────────────────
 
 /// Print friends list.
 pub fn print_friends(friends: &[Friend]) {
     if friends.is_empty() {
-        println!("No friends found.");
+        println!("{}", style_warn("친구가 없습니다."));
         return;
     }
 
-    for f in friends {
-        let name = f.display_name.as_deref()
+    let mut table = new_table(&["#", "이름"]);
+    for (i, f) in friends.iter().enumerate() {
+        let name = f
+            .display_name
+            .as_deref()
             .or(f.friend_nick_name.as_deref())
             .or(f.nick_name.as_deref())
-            .unwrap_or("(unknown)");
-        println!("  {}", name);
+            .unwrap_or("(알수없음)");
+        table.add_row(vec![Cell::new((i + 1).to_string()), Cell::new(name)]);
     }
-    println!("{} friends", friends.len());
+    println!("{table}");
+    println!("{}", style_dim(&format!("{} friends", friends.len())));
 }
 
 /// Format a Unix timestamp to a human-readable time string.
@@ -151,7 +330,12 @@ fn format_timestamp(ts: i64) -> String {
 
 /// Print AX tree for inspect command
 pub fn print_ax_tree(node: &AxNode, depth: u32) {
-    if depth > 0 && node.role.is_empty() && node.title.is_empty() && node.description.is_empty() && node.children.is_empty() {
+    if depth > 0
+        && node.role.is_empty()
+        && node.title.is_empty()
+        && node.description.is_empty()
+        && node.children.is_empty()
+    {
         return;
     }
 
@@ -170,20 +354,20 @@ pub fn print_ax_tree(node: &AxNode, depth: u32) {
         let _ = write!(meta, " description=\"{}\"", node.description);
     }
     if node.focused {
-        meta.push_str(" focused=1");
+        let _ = write!(meta, " {}", style_warn("focused=1"));
     }
     if node.selected {
-        meta.push_str(" selected=1");
+        let _ = write!(meta, " {}", style_success("selected=1"));
     }
 
-    println!("{}{}[{}]{}", prefix, "[", node.role, meta);
+    println!("{}[{}]{}", prefix, style_header(&node.role), meta);
 
     // If at max depth, show [...] marker
     if depth > 0 && node.children.is_empty() && !node.role.is_empty() {
         let indent = "  ".repeat(depth as usize) + "  ";
         // Check for truncation hint
         if node.role == "…" && node.description == "(max depth)" {
-            println!("{}  └── …(max depth)", indent);
+            println!("{}{}", indent, style_dim("└── …(max depth)"));
         }
     }
 
