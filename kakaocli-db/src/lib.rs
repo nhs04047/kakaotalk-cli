@@ -55,16 +55,48 @@ impl Database {
             return Err(DbError::DatabaseNotFound(path.to_path_buf()));
         }
 
-        // Validate key format
+        // Validate key format (macOS: 128-byte PBKDF2 output as passphrase)
         if key_hex.len() != 256 || !key_hex.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(DbError::DatabaseOpenFailed(
                 "Key must be 256 hex characters (128 bytes PBKDF2 output)".into(),
             ));
         }
 
+        // Passphrase form: SQLCipher runs its KDF over the hex string.
+        Self::open_with_key_literal(path, &format!("'{}'", key_hex), my_user_id)
+    }
+
+    /// Open with a **raw** 32-byte DEK (Windows: the key is captured from process
+    /// memory, not derived). The DEK is a 64-char hex string; SQLCipher's raw-key
+    /// form `x'<hex>'` uses it directly (no KDF) and reads the salt from the file.
+    ///
+    /// This doubles as the DEK verification oracle: a candidate key is valid iff
+    /// this succeeds.
+    pub fn open_raw_key(path: &Path, dek_hex: &str, my_user_id: i64) -> Result<Self, DbError> {
+        if !path.exists() {
+            return Err(DbError::DatabaseNotFound(path.to_path_buf()));
+        }
+
+        if dek_hex.len() != 64 || !dek_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(DbError::DatabaseOpenFailed(
+                "DEK must be 64 hex characters (32-byte raw key)".into(),
+            ));
+        }
+
+        // Raw-key form: x'<hex>' tells SQLCipher to use the bytes as-is.
+        Self::open_with_key_literal(path, &format!("\"x'{}'\"", dek_hex), my_user_id)
+    }
+
+    /// Shared open path: try cipher compatibility modes 3 and 4 (each on a fresh
+    /// read-only connection) with the given `PRAGMA key = <key_literal>` and
+    /// verify by reading `sqlite_master`. Assumes `path` exists.
+    fn open_with_key_literal(
+        path: &Path,
+        key_literal: &str,
+        my_user_id: i64,
+    ) -> Result<Self, DbError> {
         let mut last_error = DbError::DecryptionFailed;
 
-        // Try each compatibility mode with a fresh connection
         for (i, compat) in [3, 4].iter().enumerate() {
             let conn = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
                 Ok(c) => c,
@@ -79,29 +111,24 @@ impl Database {
             // set before key, SQLCipher uses its own default (v4: 256000/SHA512)
             // instead of KakaoTalk's v3 (64000/SHA1) → "file is not a database".
             let pragma_sql = format!(
-                "PRAGMA key = '{}'; PRAGMA cipher_compatibility = {};",
-                key_hex, compat
+                "PRAGMA key = {}; PRAGMA cipher_compatibility = {};",
+                key_literal, compat
             );
 
             if let Err(_e) = conn.execute_batch(&pragma_sql) {
-                // compat=3 failed — on the LAST iteration (compat=4) report failure
                 drop(conn);
                 if i == 1 {
-                    // compat=4 also failed
                     last_error = DbError::DecryptionFailed;
                 }
                 continue;
             }
 
-            // Verify key worked by reading from sqlite_master
             match conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get::<_, i64>(0)) {
                 Ok(_) => {
-                    // Compat AND key verified — we're good
                     tracing::debug!("SQLCipher opened with cipher_compatibility={}", compat);
                     return Ok(Self { conn, my_user_id });
                 }
                 Err(e) => {
-                    // Key/decrypt failed for this compat mode
                     last_error = DbError::DatabaseOpenFailed(format!(
                         "Key rejected with cipher_compatibility={}: {}", compat, e
                     ));
@@ -534,6 +561,52 @@ mod tests {
         let result = Database::open(&tmp, &"z".repeat(256), 0);
         let _ = std::fs::remove_file(&tmp);
         assert!(matches!(result, Err(DbError::DatabaseOpenFailed(_))));
+    }
+
+    #[test]
+    fn test_open_raw_key_invalid_format() {
+        let tmp = std::env::temp_dir().join("kakaocli_test_rawkey_fmt.db");
+        let _ = std::fs::File::create(&tmp);
+        // 32 chars (not 64) → rejected
+        let result = Database::open_raw_key(&tmp, &"ab".repeat(16), 0);
+        let _ = std::fs::remove_file(&tmp);
+        assert!(matches!(result, Err(DbError::DatabaseOpenFailed(_))));
+    }
+
+    /// Create a SQLCipher DB with a raw 32-byte key, then open it via
+    /// `open_raw_key` — the exact path the Windows DEK oracle will use.
+    #[test]
+    fn test_open_raw_key_roundtrip() {
+        let dek = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let tmp = std::env::temp_dir().join("kakaocli_test_rawkey_roundtrip.edb");
+        let _ = std::fs::remove_file(&tmp);
+
+        // Encrypt a fresh DB with the raw key (compat 4).
+        {
+            let conn = Connection::open_with_flags(
+                &tmp,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+            )
+            .unwrap();
+            conn.execute_batch(&format!(
+                "PRAGMA key = \"x'{}'\"; PRAGMA cipher_compatibility = 4; \
+                 CREATE TABLE NTChatMessage (logId INTEGER); \
+                 INSERT INTO NTChatMessage VALUES (1);",
+                dek
+            ))
+            .unwrap();
+        }
+
+        // Correct DEK opens and reads.
+        let db = Database::open_raw_key(&tmp, dek, 0).expect("raw key should open the DB");
+        let tables = db.verify_tables().unwrap();
+        assert!(tables.iter().any(|t| t == "NTChatMessage"));
+
+        // Wrong DEK is rejected — this is the oracle's negative case.
+        let wrong = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        assert!(Database::open_raw_key(&tmp, wrong, 0).is_err());
+
+        let _ = std::fs::remove_file(&tmp);
     }
 
     #[test]
