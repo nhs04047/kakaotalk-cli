@@ -78,15 +78,37 @@ impl PlatformBackend for DarwinBackend {
     }
 
     fn check_status() -> Result<AppStatus, PlatformError> {
-        if !db_path::check_full_disk_access() {
+        // Filesystem probes on the KakaoTalk container can block indefinitely
+        // when a macOS privacy consent dialog (Full Disk Access) is pending —
+        // the syscall neither succeeds nor errors, it just hangs. Run them on a
+        // worker thread with a timeout so `check` always terminates.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let fda = db_path::check_full_disk_access();
+            let db_exists = fda && db_path::mac_db_files().first().is_some();
+            let _ = tx.send((fda, db_exists));
+        });
+
+        let (fda, db_exists) = match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(v) => v,
+            Err(_) => {
+                return Err(PlatformError::Other(
+                    "디스크 접근 확인이 응답하지 않습니다 — macOS 개인정보 동의창(전체 디스크 접근)이 \
+                     화면에서 대기 중일 수 있습니다. 대화상자를 처리하거나, 시스템 설정 > 개인정보 보호 및 \
+                     보안 > 전체 디스크 접근에서 권한을 부여한 뒤 다시 시도하세요."
+                        .into(),
+                ));
+            }
+        };
+
+        if !fda {
             return Err(PlatformError::Other(
-                "Full Disk Access not granted. Grant it in System Settings > Privacy & Security".into(),
+                "전체 디스크 접근 권한이 없습니다. 시스템 설정 > 개인정보 보호 및 보안 > 전체 디스크 접근에서 부여하세요.".into(),
             ));
         }
 
         let running = is_kakaotalk_running();
         let logged_in = running && is_kakaotalk_logged_in();
-        let db_exists = db_path::mac_db_files().first().is_some();
 
         match (running, logged_in, db_exists) {
             (true, true, _) => Ok(AppStatus::Ready),
@@ -103,13 +125,14 @@ impl PlatformBackend for DarwinBackend {
 
     fn send_message(chat_name: &str, text: &str) -> Result<(), PlatformError> {
         if !check_accessibility() {
+            prompt_accessibility();
             user_facing_instruction(
-                "KakaoTalk send needs Accessibility permission.\n\
-                 → System Settings > Privacy & Security > Accessibility\n\
-                 → Add Terminal (or iTerm2) and enable it.",
+                "메시지 전송에는 손쉬운 사용(Accessibility) 권한이 필요합니다.\n\
+                 → 시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용\n\
+                 → 이 명령을 실행한 앱(터미널, 또는 Claude 등 상위 앱)을 추가하고 켜세요.",
             );
             return Err(PlatformError::Other(
-                "Accessibility permission not granted. See instructions above.".into(),
+                "손쉬운 사용 권한이 없습니다. 위 안내를 참고하세요.".into(),
             ));
         }
 
@@ -146,12 +169,13 @@ impl PlatformBackend for DarwinBackend {
 
     fn dump_ax_tree(chat: Option<&str>, max_depth: u32) -> Result<AxNode, PlatformError> {
         if !check_accessibility() {
+            prompt_accessibility();
             user_facing_instruction(
-                "inspect needs Accessibility permission.\n\
-                 → System Settings > Privacy & Security > Accessibility\n\
-                 → Add Terminal (or iTerm2) and enable it.",
+                "inspect에는 손쉬운 사용(Accessibility) 권한이 필요합니다.\n\
+                 → 시스템 설정 > 개인정보 보호 및 보안 > 손쉬운 사용\n\
+                 → 이 명령을 실행한 앱(터미널, 또는 Claude 등 상위 앱)을 추가하고 켜세요.",
             );
-            return Err(PlatformError::Other("Accessibility permission not granted".into()));
+            return Err(PlatformError::Other("손쉬운 사용 권한이 없습니다.".into()));
         }
 
         let app = get_kakaotalk_ax_app()
@@ -239,6 +263,31 @@ fn check_accessibility() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
 }
 
+/// Ask macOS to surface the Accessibility consent dialog for the responsible
+/// process (best-effort). Unlike `AXIsProcessTrusted`, the WithOptions variant
+/// pops the system prompt when `kAXTrustedCheckOptionPrompt` is set, so the user
+/// is guided to the right pane instead of silently seeing a failure.
+fn prompt_accessibility() {
+    use core_foundation::base::TCFType;
+    use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
+    use core_foundation::string::CFStringRef;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+        static kAXTrustedCheckOptionPrompt: CFStringRef;
+    }
+
+    // SAFETY: the static is a CFStringRef exported by ApplicationServices; we
+    // wrap it under the get rule (no ownership transfer) and pass a valid dict.
+    unsafe {
+        let key = CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt);
+        let value = CFBoolean::true_value();
+        let opts = CFDictionary::from_CFType_pairs(&[(key.as_CFType(), value.as_CFType())]);
+        let _ = AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef());
+    }
+}
+
 fn user_facing_instruction(msg: &str) {
     eprintln!("ℹ️  {}", msg);
 }
@@ -324,7 +373,7 @@ fn find_chat_row_with_scroll(
     name: &str,
     max_scrolls: u32,
 ) -> Result<accessibility::AXUIElement, PlatformError> {
-    if name == "_" || name == "badge me" || name == "me" {
+    if is_self_chat_query(name) {
         return find_self_chat_row(chat_list);
     }
 
@@ -370,6 +419,13 @@ fn find_self_chat_row(
         }
     }
     Err(PlatformError::UiError("Self-chat 'badge me' row not found".into()))
+}
+
+/// Whether a chat query refers to the user's own self-chat ("나와의 채팅").
+/// These sentinels are matched by a distinctive row marker ("badge me"), not by
+/// the chat title, so verification must special-case them too.
+fn is_self_chat_query(name: &str) -> bool {
+    matches!(name, "_" | "me" | "badge me")
 }
 
 fn row_name_matches(row_name: &str, query: &str) -> bool {
@@ -458,11 +514,20 @@ fn verify_chat_window(expected_name: &str) -> Result<(), PlatformError> {
         .attribute(&AXAttribute::windows())
         .map_err(|_| PlatformError::UiError("Cannot list windows".into()))?;
 
+    let self_chat = is_self_chat_query(expected_name);
+
     for w in windows.iter() {
         if let Ok(title) = w.attribute(&AXAttribute::title()) {
             let title_str: String = title.to_string();
             if title_str.is_empty() || title_str == "KakaoTalk" {
                 continue;
+            }
+            // Self-chat's window title is the user's own display name, which the
+            // "_" sentinel can never match. The distinctive "badge me" row lookup
+            // already guaranteed the correct row, so any real chat window opening
+            // is sufficient confirmation here.
+            if self_chat {
+                return Ok(());
             }
             if title_str.contains(expected_name) || expected_name.contains(&title_str) {
                 return Ok(());
@@ -475,7 +540,7 @@ fn verify_chat_window(expected_name: &str) -> Result<(), PlatformError> {
     }
 
     Err(PlatformError::UiError(format!(
-        "Chat window for '{}' did not open", expected_name
+        "'{}' 채팅창이 열리지 않았습니다", expected_name
     )))
 }
 
