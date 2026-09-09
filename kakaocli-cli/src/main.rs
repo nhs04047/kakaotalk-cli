@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use kakaocli_core::model::*;
 use kakaocli_db::Database;
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::time::Duration;
 
@@ -134,15 +135,24 @@ enum Command {
         depth: u32,
     },
 
-    /// 새 메시지 모니터링 (Phase 4)
+    /// 새 메시지 모니터링 (증분 폴링 스트림)
     #[command(aliases = ["tail"])]
     Sync {
-        /// 실시간 스트리밍
+        /// 지속 폴링 (생략 시 1회 캐치업 후 종료)
         #[arg(long)]
         follow: bool,
         /// 폴링 간격 (초)
         #[arg(long, default_value = "2")]
         interval: u32,
+        /// 특정 채팅방만 (부분일치, 생략 시 전체 방)
+        #[arg(long)]
+        chat: Option<String>,
+        /// 새 메시지 배치를 이 URL로 HTTP POST
+        #[arg(long)]
+        webhook: Option<String>,
+        /// 최초 기준선을 이 시점으로 백필 (예: 1h, 30m, 2026-09-07)
+        #[arg(long)]
+        since: Option<String>,
     },
 
     /// 로그인/인증
@@ -184,7 +194,14 @@ fn main() {
         Command::Send { chat, message, me, dry_run, yes } => {
             cmd_send(&cli, chat.as_deref(), message.as_deref(), *me, *dry_run, *yes)
         }
-        Command::Sync { .. } => cmd_not_implemented("sync (Phase 4)"),
+        Command::Sync { follow, interval, chat, webhook, since } => cmd_sync(
+            &cli,
+            *follow,
+            *interval,
+            chat.as_deref(),
+            webhook.as_deref(),
+            since.as_deref(),
+        ),
         Command::Inspect { chat, depth } => cmd_inspect(&cli, chat.as_deref(), *depth),
         Command::Login { email, password, status, clear } => {
             cmd_login(&cli, email.as_deref(), password.as_deref(), *status, *clear)
@@ -474,6 +491,179 @@ fn cmd_query(cli: &Cli, sql: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ── Sync ────────────────────────────────────────────────────
+
+fn cmd_sync(
+    cli: &Cli,
+    follow: bool,
+    interval: u32,
+    chat: Option<&str>,
+    webhook: Option<&str>,
+    since: Option<&str>,
+) -> Result<(), String> {
+    use kakaocli_core::sync_state;
+
+    let db = open_db(cli)?;
+
+    // Resolve optional chat filter to a chat_id.
+    let chat_id: Option<i64> = match chat {
+        Some(name) => Some(
+            db.resolve_chat_id(name)
+                .map_err(|e| format!("채팅방 조회 실패: {}", e))?
+                .ok_or_else(|| {
+                    format!("'{}' 채팅방을 찾지 못했습니다. 이름 없이 실행하면 전체 방을 따라갑니다.", name)
+                })?
+                .0,
+        ),
+        None => None,
+    };
+    let single_room = chat_id.is_some();
+
+    // Room-name map for display (all-rooms mode only).
+    let chat_names: HashMap<i64, String> = if single_room {
+        HashMap::new()
+    } else {
+        db.list_chats(500)
+            .map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?
+            .into_iter()
+            .map(|c| (c.id, c.display_name))
+            .collect()
+    };
+
+    // Establish the baseline (last processed logId).
+    let mut last = match sync_state::load(chat_id) {
+        Some(v) => v,
+        None => match parse_since(since) {
+            Some(ts) => match db
+                .log_id_before_since(chat_id, ts)
+                .map_err(|e| format!("기준선 조회 실패: {}", e))?
+            {
+                Some(base) => base,
+                None => db.max_log_id(chat_id).map_err(|e| format!("기준선 조회 실패: {}", e))?,
+            },
+            None => db.max_log_id(chat_id).map_err(|e| format!("기준선 조회 실패: {}", e))?,
+        },
+    };
+
+    let webhook_client = webhook.map(|_| reqwest::blocking::Client::new());
+    const LIMIT: u32 = 500;
+
+    loop {
+        // Drain any backlog fully within this tick (bounded batches).
+        loop {
+            let batch = db
+                .messages_after(last, chat_id, LIMIT)
+                .map_err(|e| format!("메시지 조회 실패: {}", e))?;
+            if batch.is_empty() {
+                break;
+            }
+
+            for m in &batch {
+                emit_sync_message(cli, m, &chat_names, single_room);
+            }
+            if let (Some(client), Some(url)) = (webhook_client.as_ref(), webhook) {
+                let payload: Vec<serde_json::Value> =
+                    batch.iter().map(|m| sync_message_json(m, &chat_names)).collect();
+                post_webhook(client, url, &payload);
+            }
+
+            last = batch.last().map(|m| m.id).unwrap_or(last);
+            let _ = sync_state::save(chat_id, last);
+
+            if batch.len() < LIMIT as usize {
+                break;
+            }
+        }
+
+        if !follow {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(interval.max(1) as u64));
+    }
+
+    Ok(())
+}
+
+/// Room display name for a chat id; falls back to the numeric id.
+fn room_name_for(chat_names: &HashMap<i64, String>, chat_id: i64) -> String {
+    chat_names
+        .get(&chat_id)
+        .cloned()
+        .unwrap_or_else(|| chat_id.to_string())
+}
+
+fn message_type_str(t: &MessageType) -> &'static str {
+    match t {
+        MessageType::Text => "text",
+        MessageType::Photo => "photo",
+        MessageType::Video => "video",
+        MessageType::Unknown(_) => "unknown",
+    }
+}
+
+/// A message's Unix timestamp as RFC 3339 in the local timezone.
+fn format_rfc3339_local(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|dt| dt.with_timezone(&chrono::Local).to_rfc3339())
+        .unwrap_or_else(|| ts.to_string())
+}
+
+/// The NDJSON object for one message (also the webhook array element).
+fn sync_message_json(m: &Message, chat_names: &HashMap<i64, String>) -> serde_json::Value {
+    serde_json::json!({
+        "type": "message",
+        "logId": m.id,
+        "chatId": m.chat_id,
+        "chat": room_name_for(chat_names, m.chat_id),
+        "sender": m.sender_name,
+        "fromMe": m.is_from_me,
+        "text": m.text,
+        "time": format_rfc3339_local(m.created_at),
+        "msgType": message_type_str(&m.message_type),
+    })
+}
+
+/// Emit one message to stdout: NDJSON with `--json`, else a human line. Flushes
+/// so the stream is visible immediately when piped.
+fn emit_sync_message(cli: &Cli, m: &Message, chat_names: &HashMap<i64, String>, single_room: bool) {
+    use std::io::Write;
+    if cli.json {
+        println!("{}", sync_message_json(m, chat_names));
+    } else {
+        let room = room_name_for(chat_names, m.chat_id);
+        display::print_sync_message(m, &room, single_room);
+    }
+    let _ = std::io::stdout().flush();
+}
+
+/// POST a batch as a JSON array. Timeout 5s, one retry; on final failure warn to
+/// stderr and continue (the stdout stream must not stall on a bad webhook).
+fn post_webhook(client: &reqwest::blocking::Client, url: &str, payload: &[serde_json::Value]) {
+    for attempt in 0..2 {
+        let result = client
+            .post(url)
+            .timeout(Duration::from_secs(5))
+            .json(payload)
+            .send();
+        match result {
+            Ok(resp) if resp.status().is_success() => return,
+            Ok(resp) if attempt == 1 => {
+                eprintln!(
+                    "{}",
+                    display::style_warn(&format!("웹훅 응답 오류 {} → {}", resp.status(), url))
+                );
+            }
+            Err(e) if attempt == 1 => {
+                eprintln!(
+                    "{}",
+                    display::style_warn(&format!("웹훅 전송 실패: {} → {}", e, url))
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 fn cmd_inspect(cli: &Cli, chat: Option<&str>, depth: u32) -> Result<(), String> {
     use kakaocli_platform::PlatformBackend;
     let tree = kakaocli_platform::Platform::dump_ax_tree(chat, depth)
@@ -590,10 +780,6 @@ fn cmd_login(_cli: &Cli, email: Option<&str>, password: Option<&str>, status: bo
     }
 
     not_implemented_yet("interactive login (use --email + --password)");
-}
-
-fn cmd_not_implemented(feature: &str) -> Result<(), String> {
-    Err(format!("Not implemented: {}. See docs/roadmap.md for timeline.", feature))
 }
 
 // ── Since parser ────────────────────────────────────────────

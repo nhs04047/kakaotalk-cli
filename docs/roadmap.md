@@ -51,7 +51,7 @@ Windows에서 kakaocli send    → 전송 성공
 
 ## Phase 4: 안정화 + sync (예상: 1주)
 
-- [ ] sync: 폴링 NDJSON 스트림
+- [~] sync: 증분 폴링 스트림 구현 완료(검증 대기) — 사람친화 기본 + --json NDJSON, --chat 필터, --webhook, --since 백필, ~/.kakaocli/sync.json 체크포인트. 설계: docs/superpowers/specs/2026-09-09-sync-design.md
 - [ ] 에러 처리 강화
 - [ ] 플랫폼별 crash report 처리
 - [ ] 문서화 (README, AGENTS.md)
