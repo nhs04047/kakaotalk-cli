@@ -43,110 +43,61 @@ pub fn mac_db_files() -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// macOS: extract user ID from KakaoTalk preferences plist (kakaocli 방식)
+/// macOS: extract user ID from KakaoTalk preferences plist
 ///
-/// KakaoTalk stores user ID in the container-scoped preferences plist.
-/// Multiple extraction strategies are tried in order:
-/// 1. FSChatWindowTransparency 공통 접미사 (키 이름에서 추출)
-/// 2. Direct key lookup (userId, user_id, KAKAO_USER_ID, userID)
-/// 3. NSWindow Frame FSChatWindowFrame_ 공통 접미사
+/// KakaoTalk stores user ID obfuscated in the container-scoped preferences plist.
+/// Strategy: find DESIGNATEDFRIENDSREVISION:<sha512> with non-zero value
+/// (= active account), then brute-force SHA-512 to find the matching userId.
 pub fn mac_user_id() -> Option<u64> {
-    // 1. Find the right plist — container plist preferred (may have hex suffix)
-    let plist_candidates = vec![
-        mac_container_user_prefs_path(),
-        mac_global_prefs_path(),
-    ];
+    let plist_candidates = mac_plist_candidates();
 
-    for plist_path in plist_candidates {
+    for plist_path in &plist_candidates {
         if !plist_path.exists() {
             continue;
         }
+        let plist_value: plist::Value = match plist::from_file(plist_path).ok() {
+            Some(v) => v,
+            None => continue,
+        };
+        let dict = match plist_value.into_dictionary() {
+            Some(d) => d,
+            None => continue,
+        };
 
-        let plist_value: plist::Value = plist::from_file(&plist_path).ok()?;
-        let dict = plist_value.into_dictionary()?;
-
-        // Strategy 1: FSChatWindowTransparency 공통 접미사
-        let transparency_prefix = "FSChatWindowTransparency";
-        let fs_chat_keys: Vec<&str> = dict.keys()
-            .filter(|k| k.starts_with(transparency_prefix))
-            .map(|k| k.as_str())
-            .collect();
-        if fs_chat_keys.len() >= 2 {
-            let suffixes: Vec<&str> = fs_chat_keys.iter()
-                .map(|k| &k[transparency_prefix.len()..])
-                .collect();
-            if let Some(common) = longest_common_suffix(&suffixes) {
-                if let Ok(id) = common.parse::<u64>() {
-                    return Some(id);
-                }
-            }
-        }
-
-        // Strategy 2: Direct key lookup
-        let candidate_keys = ["userId", "user_id", "KAKAO_USER_ID", "userID"];
-        for key in &candidate_keys {
-            if let Some(val) = dict.get(*key) {
-                if let Some(n) = val.as_unsigned_integer() {
-                    if n > 0 {
-                        return Some(n);
-                    }
-                }
-                if let Some(s) = val.as_string() {
-                    if let Ok(n) = s.parse::<u64>() {
-                        return Some(n);
-                    }
-                }
-            }
-        }
-
-        // Strategy 3: NSWindow Frame FSChatWindowFrame_ 공통 접미사
-        let frame_prefix = "NSWindow Frame FSChatWindowFrame_";
-        let frame_keys: Vec<&str> = dict.keys()
-            .filter(|k| k.starts_with(frame_prefix))
-            .map(|k| k.as_str())
-            .collect();
-        if frame_keys.len() >= 2 {
-            let suffixes: Vec<&str> = frame_keys.iter()
-                .map(|k| &k[frame_prefix.len()..])
-                .collect();
-            if let Some(common) = longest_common_suffix(&suffixes) {
-                if let Ok(id) = common.parse::<u64>() {
-                    return Some(id);
-                }
-            }
-        }
-
-        // Strategy 4: SHA-512 hash recovery from DESIGNATEDFRIENDSREVISION
+        // Find active account SHA-512 hash from DESIGNATEDFRIENDSREVISION:<sha512> keys
         let hash_prefix = "DESIGNATEDFRIENDSREVISION:";
         let empty_hash = "31bca02094eb78126a517b206a88c73cfa9ec6f704c7030d18212cace820f025f00bf0ea68dbf3f3a5436ca63b53bf7bf80ad8d5de7d8359d0b7fed9dbc3ab99";
-        let active_hash = dict.iter().find_map(|(key, val)| {
+        let active_hash: Option<String> = dict.iter().find_map(|(key, val)| {
             if key.starts_with(hash_prefix) {
                 let hash = &key[hash_prefix.len()..];
-                if hash == empty_hash { return None; }
-                let is_nonzero = val.as_unsigned_integer().map(|n| n > 0)
+                if hash == empty_hash {
+                    return None;
+                }
+                let is_nonzero = val
+                    .as_unsigned_integer()
+                    .map(|n| n > 0)
                     .unwrap_or_else(|| val.as_real().map(|f| f != 0.0).unwrap_or(false));
-                if is_nonzero { Some(hash.to_string()) } else { None }
-            } else { None }
+                if is_nonzero {
+                    Some(hash.to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         });
-        if let Some(ref active_hash) = active_hash {
-            if let Some(candidates) = dict.get("AlertKakaoIDsList") {
-                if let Some(arr) = candidates.as_array() {
-                    for candidate in arr {
-                        let id = match candidate.as_unsigned_integer() {
-                            Some(n) => n,
-                            None => match candidate.as_signed_integer() {
-                                Some(n) if n > 0 => n as u64,
-                                _ => 0,
-                            },
-                        };
-                        if id == 0 { continue; }
-                        use ring::digest::{digest, SHA512};
-                        let computed = digest(&SHA512, id.to_string().as_bytes());
-                        let computed_hex = hex::encode(computed.as_ref());
-                        if computed_hex == active_hash.as_str() {
-                            return Some(id);
-                        }
-                    }
+
+        if let Some(active_hash) = active_hash {
+            // Brute-force SHA-512 from 0 upward until we find a match.
+            // userIds are typically small integers (< 1M).
+            use ring::digest::{digest, SHA512};
+            let max_id = 1_000_000;
+            for candidate in 0..max_id {
+                let id_str = candidate.to_string();
+                let computed = digest(&SHA512, id_str.as_bytes());
+                let computed_hex = hex::encode(computed.as_ref());
+                if computed_hex == active_hash {
+                    return Some(candidate);
                 }
             }
         }
@@ -155,9 +106,12 @@ pub fn mac_user_id() -> Option<u64> {
     None
 }
 
-/// 컨테이너 내부의 사용자 preferences plist 경로 (hex-suffix plist 우선)
-fn mac_container_user_prefs_path() -> PathBuf {
-    let container = mac_container_path(); // .../Data/
+/// 모든 plist 후보를 크기 내림차순으로 반환 (빈 plist를 나중에 보게)
+fn mac_plist_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    // Container hex-suffix plists
+    let container = mac_container_path();
     let prefs_dir = container.join("Library/Preferences");
     if let Ok(entries) = std::fs::read_dir(&prefs_dir) {
         for entry in entries.flatten() {
@@ -167,38 +121,27 @@ fn mac_container_user_prefs_path() -> PathBuf {
                     && name_str.ends_with(".plist")
                     && name_str != "com.kakao.KakaoTalkMac.plist"
                 {
-                    return prefs_dir.join(name_str);
+                    candidates.push(prefs_dir.join(name_str));
                 }
             }
         }
     }
-    // Fallback: hex-suffix plist 없으면 기본
-    prefs_dir.join("com.kakao.KakaoTalkMac.plist")
-}
 
-/// 글로벌 preferences plist 경로
-fn mac_global_prefs_path() -> PathBuf {
+    // Container base plist
+    candidates.push(prefs_dir.join("com.kakao.KakaoTalkMac.plist"));
+
+    // Global plist
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/Shared".into());
-    PathBuf::from(home).join("Library/Preferences/com.kakao.KakaoTalkMac.plist")
-}
+    candidates.push(PathBuf::from(home).join("Library/Preferences/com.kakao.KakaoTalkMac.plist"));
 
-/// 문자열 배열의 공통 접미사 찾기
-fn longest_common_suffix(strings: &[&str]) -> Option<String> {
-    let first = strings.first()?;
-    let reversed: Vec<String> = strings.iter().map(|s| s.chars().rev().collect()).collect();
-    let mut common_len = 0usize;
-    'outer: for (i, ch) in reversed[0].char_indices() {
-        for r in &reversed[1..] {
-            if r.chars().nth(i) != Some(ch) {
-                break 'outer;
-            }
-        }
-        common_len = i + 1; // char_indices is 0-based, but we want 1-based count
-    }
-    if common_len == 0 {
-        return None;
-    }
-    Some(first[first.len() - common_len..].to_string())
+    // Sort by file size descending (largest first = most data)
+    candidates.sort_by(|a, b| {
+        let a_size = std::fs::metadata(a).map(|m| m.len()).unwrap_or(0);
+        let b_size = std::fs::metadata(b).map(|m| m.len()).unwrap_or(0);
+        b_size.cmp(&a_size)
+    });
+
+    candidates
 }
 
 /// macOS: get platform UUID from IOPlatformExpertDevice (ioreg)
