@@ -4,11 +4,10 @@
 ///
 /// ## Key format
 /// KDF outputs 128 bytes via PBKDF2-HMAC-SHA256 (100,000 iterations).
-/// Only the **first 32 bytes** are used as the raw SQLCipher key.
-/// This must be passed as a hex-encoded raw key via:
-///   PRAGMA key = "x'<64-char-hex>'"
-/// NOT as:
-///   PRAGMA key = '<passphrase>'  ← this re-derives the key via SQLCipher's KDF and fails!
+/// The FULL 128 bytes are hex-encoded (256 chars) and used as a **passphrase**:
+///   PRAGMA key = '<256-char-hex>'
+/// (kakaocli Swift: `PRAGMA KEY='<hex>'` — SQLCipher re-derives internally.)
+/// Do NOT truncate to 32 bytes — that would yield a different key.
 
 use ring::digest::{digest, SHA1_FOR_LEGACY_USE_ONLY, SHA256};
 use ring::pbkdf2;
@@ -25,13 +24,17 @@ const SHA1_LEN: usize = 20;
 /// SHA-256 digest output length
 const SHA256_LEN: usize = 32;
 
-/// Derive hex-encoded raw SQLCipher key (64 hex chars = 32 bytes).
+/// Derive hex-encoded SQLCipher passphrase key (256 hex chars = 128 bytes).
 ///
 /// Algorithm (identical to kakaocli's KeyDerivation.secureKey):
 /// 1. Hash device UUID with SHA-1 + SHA-256 → concatenate → base64 encode
 /// 2. Build password string from userId + UUID + fixed salts
 /// 3. PBKDF2-HMAC-SHA256, 100k iterations → 128 bytes
-/// 4. Take first 32 bytes → hex encode
+/// 4. Hex-encode the FULL 128 bytes → used as passphrase via `PRAGMA key = '...'`
+///
+/// NOTE: kakaocli (Swift) uses `PRAGMA KEY='<hex>'` which makes SQLCipher
+/// re-derive the key (passphrase KDF). The FULL 128-byte hex must be used,
+/// NOT just the first 32 bytes.
 pub fn derive_mac_key(user_id: u64, device_uuid: &str) -> String {
     let hashed = hashed_device_uuid(device_uuid);
     let uuid_str = device_uuid.to_string();
@@ -62,8 +65,9 @@ pub fn derive_mac_key(user_id: u64, device_uuid: &str) -> String {
         &mut output,
     );
 
-    // First 32 bytes → hex
-    hex::encode(&output[..32])
+    // Full 128 bytes → hex (256 chars) — passphrase for SQLCipher
+    // (kakaocli Swift: derived.map { String(format: "%02x", $0) }.joined())
+    hex::encode(&output)
 }
 
 /// Derive the encrypted database filename (hex string, no extension).
@@ -129,7 +133,7 @@ mod tests {
         let key1 = derive_mac_key(12345, "test-uuid-0000");
         let key2 = derive_mac_key(12345, "test-uuid-0000");
         assert_eq!(key1, key2);
-        assert_eq!(key1.len(), 64); // 32 bytes = 64 hex chars
+        assert_eq!(key1.len(), 256); // 128 bytes = 256 hex chars (full PBKDF2 output)
     }
 
     #[test]
@@ -149,7 +153,7 @@ mod tests {
     #[test]
     fn test_key_length_is_64_hex_chars() {
         let key = derive_mac_key(42, "550e8400-e29b-41d4-a716-446655440000");
-        assert_eq!(key.len(), 64);
+        assert_eq!(key.len(), 256);
         // Verify it's valid hex
         assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -195,6 +199,6 @@ mod tests {
         // Verify the "reversed" aspect of derive_mac_key
         let key = derive_mac_key(42, "short");
         // Just verify it doesn't panic with short UUIDs
-        assert_eq!(key.len(), 64);
+        assert_eq!(key.len(), 256);
     }
 }

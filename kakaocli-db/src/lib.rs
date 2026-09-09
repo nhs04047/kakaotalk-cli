@@ -4,9 +4,9 @@
 //! All queries are read-only (SQLITE_OPEN_READ_ONLY).
 //!
 //! # Key format
-//! Key must be a 64-char hex string (32 bytes raw key).
-//! Passed via: `PRAGMA key = "x'<64-char-hex>'"`
-//! NOT: `PRAGMA key = '<passphrase>'` (would re-KDF and fail).
+//! Key must be a 256-char hex string (128 bytes full PBKDF2 output).
+//! Passed as a SQLCipher passphrase via: `PRAGMA key = '<256-char-hex>'`
+//! (kakaocli Swift uses `PRAGMA KEY='<hex>'` — SQLCipher re-derives the key).
 
 use std::path::Path;
 
@@ -49,16 +49,16 @@ impl Database {
     /// and passed in — avoids depending on the NTChatContext schema which varies.
     ///
     /// Tries cipher compatibility modes 3 and 4, each with a **fresh connection**.
-    /// Uses the key as a raw key via `PRAGMA key = "x'<hex>'"`.
+    /// Uses the key as a passphrase via `PRAGMA key = '<hex>'` (kakaocli Swift compatible).
     pub fn open(path: &Path, key_hex: &str, my_user_id: i64) -> Result<Self, DbError> {
         if !path.exists() {
             return Err(DbError::DatabaseNotFound(path.to_path_buf()));
         }
 
         // Validate key format
-        if key_hex.len() != 64 || !key_hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        if key_hex.len() != 256 || !key_hex.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(DbError::DatabaseOpenFailed(
-                "Key must be 64 hex characters (32 bytes)".into(),
+                "Key must be 256 hex characters (128 bytes PBKDF2 output)".into(),
             ));
         }
 
@@ -74,9 +74,9 @@ impl Database {
                 }
             };
 
-            // Set compatibility mode and key atomically
+            // Set compatibility mode and key atomically (passphrase mode, kakaocli Swift compatible)
             let pragma_sql = format!(
-                "PRAGMA cipher_compatibility = {}; PRAGMA key = \"x'{}'\";",
+                "PRAGMA cipher_compatibility = {}; PRAGMA key = '{}';",
                 compat, key_hex
             );
 
@@ -451,7 +451,7 @@ mod tests {
     fn test_open_non_hex_key() {
         let tmp = std::env::temp_dir().join("kakaocli_test_non_hex.db");
         let _ = std::fs::File::create(&tmp);
-        let result = Database::open(&tmp, &"z".repeat(64), 0);
+        let result = Database::open(&tmp, &"z".repeat(256), 0);
         let _ = std::fs::remove_file(&tmp);
         assert!(matches!(result, Err(DbError::DatabaseOpenFailed(_))));
     }

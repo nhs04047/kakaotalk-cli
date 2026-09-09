@@ -211,14 +211,10 @@ fn open_db(cli: &Cli) -> Result<Database, String> {
             .map_err(|e| format!("Cannot resolve DB key: {}\n\n{}", e, hint))?
     };
 
-    let my_uid = if let Some(uid) = cli.user_id {
-        uid as i64
-    } else {
-        // Try to get from platform, fallback to 0
-        kakaocli_core::db_path::mac_user_id()
-            .map(|id| id as i64)
-            .unwrap_or(0)
-    };
+    let my_uid = cli
+        .user_id
+        .or_else(kakaocli_core::db_path::read_cached_user_id)
+        .unwrap_or(0) as i64;
 
     let db = Database::open(&db_key.db_path, &db_key.key_hex, my_uid)
         .map_err(|e| format!("Failed to open database: {}", e))?;
