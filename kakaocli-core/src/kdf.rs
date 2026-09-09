@@ -93,8 +93,8 @@ pub fn derive_mac_db_name(user_id: u64, device_uuid: &str) -> String {
     );
 
     let hex_full = hex::encode(output);
-    // Take hex chars [28..78) (kakaocli compatibility)
-    hex_full[28..78].to_string()
+    // Take hex chars [28..106) — kakaocli Swift: start=28, offsetBy=78 → 78 chars
+    hex_full[28..106].to_string()
 }
 
 /// SHA-1 + SHA-256 of UUID, base64-encoded (kakaocli compatible)
@@ -164,8 +164,8 @@ mod tests {
     #[test]
     fn test_db_name_length() {
         let name = derive_mac_db_name(42, "550e8400-e29b-41d4-a716-446655440000");
-        // kakaocli: start=28, end=78 in hex = 78-28 = 50 hex chars = 25 bytes
-        assert_eq!(name.len(), 50);
+        // kakaocli: start=28, offsetBy=78 → hex[28..106] = 78 hex chars = 39 bytes
+        assert_eq!(name.len(), 78);
     }
 
     #[test]

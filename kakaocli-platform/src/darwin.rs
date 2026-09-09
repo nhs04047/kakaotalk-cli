@@ -26,18 +26,53 @@ const KEY_W: u16 = 13;
 pub struct DarwinBackend;
 
 impl PlatformBackend for DarwinBackend {
-    fn resolve_db_key() -> Result<DbKey, PlatformError> {
+    fn resolve_db_key(user_id: Option<u64>) -> Result<DbKey, PlatformError> {
         let uuid = db_path::mac_platform_uuid()
             .ok_or_else(|| PlatformError::Other("Cannot read IOPlatformUUID".into()))?;
-        let user_id = db_path::mac_user_id()
-            .ok_or_else(|| PlatformError::Other("Cannot read userId from plist".into()))?;
-        let key_hex = kakaocli_core::kdf::derive_mac_key(user_id, &uuid);
 
+        // Determine user ID: 1) --user-id override, 2) cached value, 3) plist heuristics
+        let user_id = match user_id {
+            Some(uid) => uid,
+            None => match db_path::read_cached_user_id() {
+                Some(uid) => uid,
+                None => db_path::mac_user_id().ok_or_else(|| {
+                    PlatformError::Other(
+                        "Cannot determine KakaoTalk userId automatically.\n\
+                         Run: kakaocli --user-id <your_kakao_userId> auth\n\
+                         (한 번 성공하면 ~/.kakaocli/user_id 에 저장되어 다음부터 자동 적용)"
+                            .into(),
+                    )
+                })?,
+            },
+        };
+
+        let key_hex = kakaocli_core::kdf::derive_mac_key(user_id, &uuid);
+        let db_name = kakaocli_core::kdf::derive_mac_db_name(user_id, &uuid);
+
+        // Find DB file: prefer exact derived-name match, else first available
         let db_files = db_path::mac_db_files();
         let db_path = db_files
-            .first()
+            .iter()
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| {
+                        let stem = n.strip_suffix(".db").unwrap_or(n);
+                        stem == db_name
+                    })
+                    .unwrap_or(false)
+            })
             .cloned()
-            .ok_or_else(|| PlatformError::Other("No KakaoTalk database file found".into()))?;
+            .or_else(|| db_files.first().cloned())
+            .ok_or_else(|| {
+                PlatformError::Other(format!(
+                    "No KakaoTalk database file found in {}",
+                    db_path::mac_db_dir().display()
+                ))
+            })?;
+
+        // Cache the userId so future runs don't need --user-id
+        let _ = db_path::write_cached_user_id(user_id);
 
         Ok(DbKey { key_hex, db_path })
     }

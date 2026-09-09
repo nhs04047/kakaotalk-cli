@@ -7,7 +7,7 @@ use kakaocli_core::model::DbKey;
 pub struct StubBackend;
 
 impl PlatformBackend for StubBackend {
-    fn resolve_db_key() -> Result<DbKey, PlatformError> {
+    fn resolve_db_key(_user_id: Option<u64>) -> Result<DbKey, PlatformError> {
         Err(PlatformError::Other(
             "kakaocli is only supported on macOS and Windows".into(),
         ))

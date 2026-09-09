@@ -206,8 +206,9 @@ fn open_db(cli: &Cli) -> Result<Database, String> {
             db_path: std::path::PathBuf::from(path),
         }
     } else {
-        kakaocli_platform::Platform::resolve_db_key()
-            .map_err(|e| format!("Cannot resolve DB key: {}", e))?
+        let hint = "힌트: userId를 모르면 `kakaocli --user-id <본인_카카오_id> auth` 실행 (1회 입력, 이후 ~/.kakaocli/user_id 캐시)";
+        kakaocli_platform::Platform::resolve_db_key(cli.user_id)
+            .map_err(|e| format!("Cannot resolve DB key: {}\n\n{}", e, hint))?
     };
 
     let my_uid = if let Some(uid) = cli.user_id {

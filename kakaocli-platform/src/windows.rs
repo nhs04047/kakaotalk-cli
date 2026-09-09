@@ -10,7 +10,7 @@ use kakaocli_core::model::DbKey;
 pub struct WindowsBackend;
 
 impl PlatformBackend for WindowsBackend {
-    fn resolve_db_key() -> Result<DbKey, PlatformError> {
+    fn resolve_db_key(_user_id: Option<u64>) -> Result<DbKey, PlatformError> {
         // TODO: DEK scanner via windows-rs
         // 1. Find KakaoTalk.exe PID (CreateToolhelp32Snapshot)
         // 2. OpenProcess(PROCESS_VM_READ)

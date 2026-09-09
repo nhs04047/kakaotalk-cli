@@ -85,8 +85,8 @@ pub enum AppStatus {
 }
 
 pub trait PlatformBackend {
-    /// DB 키 획득 (macOS: KDF 계산, Windows: DEK 프로세스 스캔)
-    fn resolve_db_key() -> Result<DbKey, PlatformError>;
+    /// DB 키 획득 (macOS: KDF 계산 + userId 자동탐색/오버라이드, Windows: DEK 프로세스 스캔)
+    fn resolve_db_key(user_id: Option<u64>) -> Result<DbKey, PlatformError>;
 
     /// 앱 상태 확인
     fn check_status() -> Result<AppStatus, PlatformError>;

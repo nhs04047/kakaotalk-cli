@@ -16,22 +16,30 @@ pub fn mac_container_path() -> PathBuf {
         .join("Library/Containers/com.kakao.KakaoTalkMac/Data")
 }
 
-/// macOS: find all DB candidate files in container (hex filenames, no extension)
+/// macOS: KakaoTalk database directory (Application Support subdirectory)
+pub fn mac_db_dir() -> PathBuf {
+    mac_container_path()
+        .join("Library/Application Support/com.kakao.KakaoTalkMac")
+}
+
+/// macOS: find all DB candidate files (78-char hex filenames in Application Support dir)
 pub fn mac_db_files() -> Vec<PathBuf> {
-    let container = mac_container_path();
-    if !container.exists() {
+    let dir = mac_db_dir();
+    if !dir.exists() {
         return vec![];
     }
-    std::fs::read_dir(&container)
+    std::fs::read_dir(&dir)
         .map(|entries| {
             entries
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
                 .filter(|p| {
                     if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                        // Hex filename (50+ chars from DB name) and not -wal/-shm
-                        name.len() >= 50
-                            && name.chars().all(|c| c.is_ascii_hexdigit())
+                        // Strip .db extension if present
+                        let stem = name.strip_suffix(".db").unwrap_or(name);
+                        // 78-char hex filename, not -wal/-shm
+                        stem.len() == 78
+                            && stem.chars().all(|c| c.is_ascii_hexdigit())
                             && !name.ends_with("-wal")
                             && !name.ends_with("-shm")
                     } else {
@@ -208,6 +216,38 @@ pub fn check_accessibility_permission() -> bool {
 #[cfg(not(target_os = "macos"))]
 pub fn check_accessibility_permission() -> bool {
     false
+}
+
+/// kakaocli config directory (~/.kakaocli)
+pub fn config_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/Shared".into());
+    PathBuf::from(home).join(".kakaocli")
+}
+
+/// Cached userId file path (~/.kakaocli/user_id)
+fn user_id_cache_path() -> PathBuf {
+    config_dir().join("user_id")
+}
+
+/// Read cached userId from config file
+pub fn read_cached_user_id() -> Option<u64> {
+    let path = user_id_cache_path();
+    let content = std::fs::read_to_string(&path).ok()?;
+    content.trim().parse::<u64>().ok()
+}
+
+/// Write userId to config file (best-effort)
+pub fn write_cached_user_id(user_id: u64) {
+    let dir = config_dir();
+    if std::fs::create_dir_all(&dir).is_ok() {
+        // Best-effort; ignore write failures (cache is optional)
+        let _ = std::fs::write(user_id_cache_path(), user_id.to_string());
+    }
+}
+
+/// Clear cached userId
+pub fn clear_cached_user_id() {
+    let _ = std::fs::remove_file(user_id_cache_path());
 }
 
 /// Windows: KakaoTalk chat_data directory
