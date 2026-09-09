@@ -27,6 +27,25 @@ pub struct DarwinBackend;
 
 impl PlatformBackend for DarwinBackend {
     fn resolve_db_key(user_id: Option<u64>) -> Result<DbKey, PlatformError> {
+        // Fast filesystem-accessibility gate. Reading the KakaoTalk container
+        // blocks indefinitely while a macOS Full Disk Access consent dialog is
+        // pending, so data commands (chats/msg/query/sync/auth) would hang here
+        // just like `check` did. Bound it → fail fast with guidance instead.
+        // The userId SHA-512 reverse below is compute-bound (can take minutes),
+        // NOT filesystem-blocked, so it must stay OUTSIDE this timeout.
+        if kakaocli_core::util::with_timeout(std::time::Duration::from_secs(3), || {
+            db_path::mac_db_files()
+        })
+        .is_none()
+        {
+            return Err(PlatformError::Other(
+                "DB 디렉터리 읽기가 응답하지 않습니다 — macOS 전체 디스크 접근 동의창이 대기 중일 수 \
+                 있습니다. 대화상자를 처리하거나, 시스템 설정 > 개인정보 보호 및 보안 > 전체 디스크 \
+                 접근에서 권한을 부여한 뒤 다시 시도하세요."
+                    .into(),
+            ));
+        }
+
         let uuid = db_path::mac_platform_uuid()
             .ok_or_else(|| PlatformError::Other("Cannot read IOPlatformUUID".into()))?;
 
@@ -80,18 +99,17 @@ impl PlatformBackend for DarwinBackend {
     fn check_status() -> Result<AppStatus, PlatformError> {
         // Filesystem probes on the KakaoTalk container can block indefinitely
         // when a macOS privacy consent dialog (Full Disk Access) is pending —
-        // the syscall neither succeeds nor errors, it just hangs. Run them on a
-        // worker thread with a timeout so `check` always terminates.
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        // the syscall neither succeeds nor errors, it just hangs. Bound them so
+        // `check` always terminates.
+        let probe = kakaocli_core::util::with_timeout(std::time::Duration::from_secs(3), || {
             let fda = db_path::check_full_disk_access();
             let db_exists = fda && db_path::mac_db_files().first().is_some();
-            let _ = tx.send((fda, db_exists));
+            (fda, db_exists)
         });
 
-        let (fda, db_exists) = match rx.recv_timeout(std::time::Duration::from_secs(3)) {
-            Ok(v) => v,
-            Err(_) => {
+        let (fda, db_exists) = match probe {
+            Some(v) => v,
+            None => {
                 return Err(PlatformError::Other(
                     "디스크 접근 확인이 응답하지 않습니다 — macOS 개인정보 동의창(전체 디스크 접근)이 \
                      화면에서 대기 중일 수 있습니다. 대화상자를 처리하거나, 시스템 설정 > 개인정보 보호 및 \
@@ -696,5 +714,21 @@ fn filter_ax_for_chat(root: AxNode, chat_name: &str) -> AxNode {
         AxNode { children: filtered_children, ..root }
     } else {
         AxNode { role: root.role, children: Vec::new(), ..AxNode::new("") }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_self_chat_query() {
+        // self-chat sentinels
+        assert!(is_self_chat_query("_"));
+        assert!(is_self_chat_query("me"));
+        assert!(is_self_chat_query("badge me"));
+        // ordinary chat names are not self-chat
+        assert!(!is_self_chat_query("지수"));
+        assert!(!is_self_chat_query(""));
+        assert!(!is_self_chat_query("메모"));
     }
 }
