@@ -351,7 +351,7 @@ fn get_visible_rows(
         .attribute(&AXAttribute::children())
         .map_err(|_| PlatformError::Other("Cannot get chat list children".into()))?;
 
-    let rows: Vec<accessibility::AXUIElement> = children.iter().collect();
+    let rows: Vec<accessibility::AXUIElement> = children.iter().map(|r| r.clone()).collect();
 
     Ok(rows)
 }
