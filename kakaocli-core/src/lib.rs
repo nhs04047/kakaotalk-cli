@@ -3,3 +3,4 @@ pub mod model;
 pub mod kdf;
 pub mod db_path;
 pub mod sync_state;
+pub mod util;
