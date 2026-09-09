@@ -11,7 +11,6 @@ use kakaocli_core::model::DbKey;
 use accessibility::AXAttribute;
 use core_foundation::boolean::CFBoolean;
 use core_foundation::string::CFString;
-use core_foundation::base::TCFType;
 
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation, KeyCode};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};

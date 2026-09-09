@@ -402,12 +402,12 @@ fn cmd_query(cli: &Cli, sql: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_inspect(_cli: &Cli, chat: Option<&str>, depth: u32) -> Result<(), String> {
+fn cmd_inspect(cli: &Cli, chat: Option<&str>, depth: u32) -> Result<(), String> {
     use kakaocli_platform::PlatformBackend;
     let tree = kakaocli_platform::Platform::dump_ax_tree(chat, depth)
         .map_err(|e| format!("Inspect failed: {}", e))?;
 
-    if _cli.json {
+    if cli.json {
         println!("{}", serde_json::to_string_pretty(&tree).map_err(|e| e.to_string())?);
     } else {
         display::print_ax_tree(&tree, 0);
@@ -416,7 +416,7 @@ fn cmd_inspect(_cli: &Cli, chat: Option<&str>, depth: u32) -> Result<(), String>
     Ok(())
 }
 
-fn cmd_send(cli: &Cli, chat_name: &str, text: &str, me: bool, dry_run: bool) -> Result<(), String> {
+fn cmd_send(_cli: &Cli, chat_name: &str, text: &str, me: bool, dry_run: bool) -> Result<(), String> {
     let target_name = if me { "_" } else { chat_name };
 
     if dry_run {
