@@ -64,6 +64,18 @@ pub enum PlatformError {
     Other(String),
 }
 
+impl From<String> for PlatformError {
+    fn from(s: String) -> Self {
+        PlatformError::Other(s)
+    }
+}
+
+impl From<&str> for PlatformError {
+    fn from(s: &str) -> Self {
+        PlatformError::Other(s.to_string())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppStatus {
     Ready,
