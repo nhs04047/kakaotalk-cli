@@ -85,13 +85,18 @@ pub fn mac_platform_uuid() -> Option<String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         if line.contains("IOPlatformUUID") {
-            // "IOPlatformUUID" = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
-            if let Some(start) = line.find('"') {
-                let rest = &line[start + 1..];
-                if let Some(end) = rest.find('"') {
-                    let uuid = &rest[..end];
-                    if uuid.len() == 36 && uuid.chars().filter(|&c| c == '-').count() == 4 {
-                        return Some(uuid.to_string());
+            // Format: "IOPlatformUUID" = "XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
+            if let Some(equals_pos) = line.find('=') {
+                let after_equals = &line[equals_pos + 1..];
+                if let Some(start) = after_equals.find('"') {
+                    let value_part = &after_equals[start + 1..];
+                    if let Some(end) = value_part.find('"') {
+                        let uuid = &value_part[..end];
+                        if uuid.len() == 36
+                            && uuid.chars().filter(|&c| c == '-').count() == 4
+                        {
+                            return Some(uuid.to_string());
+                        }
                     }
                 }
             }
