@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Installed/built binary is `kakaocli` (not the package name `kakaocli-cli`).
+[[bin]]
+name = "kakaocli"
+path = "src/main.rs"
+
 [dependencies]
 kakaocli-core = { path = "../kakaocli-core" }
 kakaocli-db = { path = "../kakaocli-db" }
