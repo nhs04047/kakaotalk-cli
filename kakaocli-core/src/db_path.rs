@@ -115,6 +115,41 @@ pub fn mac_user_id() -> Option<u64> {
                 }
             }
         }
+
+        // Strategy 4: SHA-512 hash recovery from DESIGNATEDFRIENDSREVISION
+        let hash_prefix = "DESIGNATEDFRIENDSREVISION:";
+        let empty_hash = "31bca02094eb78126a517b206a88c73cfa9ec6f704c7030d18212cace820f025f00bf0ea68dbf3f3a5436ca63b53bf7bf80ad8d5de7d8359d0b7fed9dbc3ab99";
+        let active_hash = dict.iter().find_map(|(key, val)| {
+            if key.starts_with(hash_prefix) {
+                let hash = &key[hash_prefix.len()..];
+                if hash == empty_hash { return None; }
+                let is_nonzero = val.as_unsigned_integer().map(|n| n > 0)
+                    .unwrap_or_else(|| val.as_real().map(|f| f != 0.0).unwrap_or(false));
+                if is_nonzero { Some(hash.to_string()) } else { None }
+            } else { None }
+        });
+        if let Some(ref active_hash) = active_hash {
+            if let Some(candidates) = dict.get("AlertKakaoIDsList") {
+                if let Some(arr) = candidates.as_array() {
+                    for candidate in arr {
+                        let id = match candidate.as_unsigned_integer() {
+                            Some(n) => n,
+                            None => match candidate.as_signed_integer() {
+                                Some(n) if n > 0 => n as u64,
+                                _ => 0,
+                            },
+                        };
+                        if id == 0 { continue; }
+                        use ring::digest::{digest, SHA512};
+                        let computed = digest(&SHA512, id.to_string().as_bytes());
+                        let computed_hex = hex::encode(computed.as_ref());
+                        if computed_hex == active_hash.as_str() {
+                            return Some(id);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     None
