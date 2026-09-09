@@ -228,6 +228,83 @@ impl Database {
         Ok(rows)
     }
 
+    // ── Sync (증분 조회) ─────────────────────────────────────
+
+    /// Fetch messages with `logId > after_log_id`, oldest first, for incremental
+    /// streaming (`kakaocli sync`). `chat_id = None` scans all rooms.
+    ///
+    /// Ordered by `logId ASC` (unlike `get_messages`, which is newest-first) so a
+    /// stream emits messages in arrival order. `limit` caps one poll's batch.
+    pub fn messages_after(
+        &self,
+        after_log_id: i64,
+        chat_id: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<Message>, DbError> {
+        let sql = "\
+            SELECT m.logId, m.chatId, m.authorId, \
+                   COALESCE(u.displayName, u.friendNickName, u.nickName) as senderName, \
+                   m.message, m.type, m.sentAt \
+            FROM NTChatMessage m \
+            LEFT JOIN NTUser u ON m.authorId = u.userId AND u.linkId = 0 \
+            WHERE m.logId > ? \
+              AND (? IS NULL OR m.chatId = ?) \
+            ORDER BY m.logId ASC \
+            LIMIT ?";
+
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let my_uid = self.my_user_id;
+        let rows = stmt
+            .query_map(params![after_log_id, chat_id, chat_id, limit], |row| {
+                Ok(Message {
+                    id: row.get(0)?,
+                    chat_id: row.get(1)?,
+                    sender_id: row.get(2)?,
+                    sender_name: row.get(3)?,
+                    text: row.get(4)?,
+                    message_type: MessageType::from(row.get::<_, i32>(5)?),
+                    created_at: row.get(6)?,
+                    is_from_me: row.get::<_, i64>(2)? == my_uid,
+                })
+            })
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        Ok(rows)
+    }
+
+    /// Current maximum `logId` (baseline for a fresh sync). `chat_id = None`
+    /// spans all rooms. Returns 0 when there are no messages.
+    pub fn max_log_id(&self, chat_id: Option<i64>) -> Result<i64, DbError> {
+        let sql = "SELECT COALESCE(MAX(logId), 0) FROM NTChatMessage \
+                   WHERE (? IS NULL OR chatId = ?)";
+        self.conn
+            .query_row(sql, params![chat_id, chat_id], |row| row.get(0))
+            .map_err(|e| DbError::QueryFailed(e.to_string()))
+    }
+
+    /// Baseline `logId` for a `--since` backfill: `(min logId with sentAt >= since) - 1`,
+    /// so the first message at/after `since_ts` is included. Returns `None` when no
+    /// message is that recent (caller then falls back to the current MAX).
+    pub fn log_id_before_since(
+        &self,
+        chat_id: Option<i64>,
+        since_ts: i64,
+    ) -> Result<Option<i64>, DbError> {
+        let sql = "SELECT MIN(logId) FROM NTChatMessage \
+                   WHERE sentAt >= ? AND (? IS NULL OR chatId = ?)";
+        let min: Option<i64> = self
+            .conn
+            .query_row(sql, params![since_ts, chat_id, chat_id], |row| row.get(0))
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(min.map(|m| m - 1))
+    }
+
     // ── Search ──────────────────────────────────────────────
 
     /// Search messages by keyword (LIKE '%keyword%').
@@ -505,5 +582,108 @@ mod tests {
 
         let err = DbError::DecryptionFailed;
         assert!(err.to_string().contains("compatibility"));
+    }
+
+    // ── Sync query tests (plaintext in-memory DB) ───────────
+
+    /// Build an in-memory `Database` with the minimal NTChatMessage/NTUser
+    /// schema. Rows: (logId, chatId, authorId, message, type, sentAt).
+    fn sync_test_db(rows: &[(i64, i64, i64, &str, i32, i64)], my_uid: i64) -> Database {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE NTChatMessage (logId INTEGER, chatId INTEGER, authorId INTEGER, \
+                 message TEXT, type INTEGER, sentAt INTEGER); \
+             CREATE TABLE NTUser (userId INTEGER, linkId INTEGER, displayName TEXT, \
+                 friendNickName TEXT, nickName TEXT);",
+        )
+        .unwrap();
+        for (log_id, chat_id, author_id, msg, ty, sent_at) in rows {
+            conn.execute(
+                "INSERT INTO NTChatMessage (logId, chatId, authorId, message, type, sentAt) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                params![log_id, chat_id, author_id, msg, ty, sent_at],
+            )
+            .unwrap();
+        }
+        Database { conn, my_user_id: my_uid }
+    }
+
+    #[test]
+    fn test_messages_after_ordering_and_boundary() {
+        // logIds out of order in storage; query must return ASC and exclude == after.
+        let db = sync_test_db(
+            &[
+                (3, 1, 100, "third", 1, 300),
+                (1, 1, 100, "first", 1, 100),
+                (2, 1, 200, "second", 1, 200),
+            ],
+            100,
+        );
+
+        let msgs = db.messages_after(1, None, 100).unwrap();
+        // logId > 1 → excludes logId 1; ASC → [2, 3]
+        assert_eq!(msgs.iter().map(|m| m.id).collect::<Vec<_>>(), vec![2, 3]);
+        assert_eq!(msgs[0].text.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn test_messages_after_chat_filter_and_limit() {
+        let db = sync_test_db(
+            &[
+                (1, 10, 1, "a", 1, 1),
+                (2, 20, 1, "b", 1, 2),
+                (3, 10, 1, "c", 1, 3),
+                (4, 10, 1, "d", 1, 4),
+            ],
+            1,
+        );
+
+        // Only chat 10, logId > 0 → [1, 3, 4]; limit 2 → [1, 3]
+        let msgs = db.messages_after(0, Some(10), 2).unwrap();
+        assert_eq!(msgs.iter().map(|m| m.id).collect::<Vec<_>>(), vec![1, 3]);
+
+        // All rooms, logId > 2 → [3, 4]
+        let all = db.messages_after(2, None, 100).unwrap();
+        assert_eq!(all.iter().map(|m| m.id).collect::<Vec<_>>(), vec![3, 4]);
+    }
+
+    #[test]
+    fn test_messages_after_is_from_me() {
+        let db = sync_test_db(&[(1, 1, 100, "mine", 1, 1), (2, 1, 999, "theirs", 1, 2)], 100);
+        let msgs = db.messages_after(0, None, 100).unwrap();
+        assert!(msgs[0].is_from_me);
+        assert!(!msgs[1].is_from_me);
+    }
+
+    #[test]
+    fn test_max_log_id() {
+        let empty = sync_test_db(&[], 1);
+        assert_eq!(empty.max_log_id(None).unwrap(), 0);
+
+        let db = sync_test_db(
+            &[(5, 10, 1, "a", 1, 1), (9, 20, 1, "b", 1, 2), (7, 10, 1, "c", 1, 3)],
+            1,
+        );
+        assert_eq!(db.max_log_id(None).unwrap(), 9);
+        assert_eq!(db.max_log_id(Some(10)).unwrap(), 7);
+        assert_eq!(db.max_log_id(Some(999)).unwrap(), 0);
+    }
+
+    #[test]
+    fn test_log_id_before_since() {
+        let db = sync_test_db(
+            &[
+                (1, 10, 1, "old", 1, 100),
+                (2, 10, 1, "mid", 1, 200),
+                (3, 10, 1, "new", 1, 300),
+            ],
+            1,
+        );
+        // since=200 → first msg at/after is logId 2 → baseline 1 (so logId 2 included)
+        assert_eq!(db.log_id_before_since(None, 200).unwrap(), Some(1));
+        // since=50 → first is logId 1 → baseline 0
+        assert_eq!(db.log_id_before_since(None, 50).unwrap(), Some(0));
+        // since=999 → nothing that recent → None
+        assert_eq!(db.log_id_before_since(None, 999).unwrap(), None);
     }
 }

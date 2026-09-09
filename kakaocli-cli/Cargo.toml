@@ -22,3 +22,4 @@ comfy-table = "7"
 owo-colors = "4"
 inquire = "0.7"
 indicatif = "0.17"
+reqwest.workspace = true

@@ -319,6 +319,43 @@ pub fn print_friends(friends: &[Friend]) {
     println!("{}", style_dim(&format!("{} friends", friends.len())));
 }
 
+/// Print one message as a human-friendly sync line: `MM-DD HH:MM · [room] sender: text`.
+/// In single-room mode (`--chat`) the `[room]` prefix is omitted.
+pub fn print_sync_message(msg: &Message, room: &str, single_room: bool) {
+    let time = format_local_hm(msg.created_at);
+    let sender = msg.sender_name.as_deref().unwrap_or("(알수없음)");
+    let text = msg.text.as_deref().unwrap_or("");
+    let room_prefix = if single_room {
+        String::new()
+    } else {
+        format!("[{}] ", room)
+    };
+
+    if color_enabled() {
+        let time_s = time.dimmed().to_string();
+        let room_s = room_prefix.dimmed().to_string();
+        let sender_s = if msg.is_from_me {
+            sender.green().bold().to_string()
+        } else {
+            sender.blue().to_string()
+        };
+        println!("{} · {}{}: {}", time_s, room_s, sender_s, text);
+    } else {
+        println!("{} · {}{}: {}", time, room_prefix, sender, text);
+    }
+}
+
+/// A Unix timestamp as `MM-DD HH:MM` in the local timezone (sync stream lines).
+fn format_local_hm(ts: i64) -> String {
+    match chrono::DateTime::from_timestamp(ts, 0) {
+        Some(dt) => dt
+            .with_timezone(&chrono::Local)
+            .format("%m-%d %H:%M")
+            .to_string(),
+        None => ts.to_string(),
+    }
+}
+
 /// Format a Unix timestamp to a human-readable time string.
 fn format_timestamp(ts: i64) -> String {
     let dt = chrono::DateTime::from_timestamp(ts, 0);
