@@ -452,6 +452,19 @@ impl Database {
         Ok(map)
     }
 
+    /// Windows: derive the user's own `userId` from `chatListInfo.edb`. The user
+    /// is a member of every room, so the most-frequent `chatMembers.userId` is
+    /// them. Used to set `is_from_me` when reading messages.
+    pub fn windows_own_user_id(&self) -> Result<Option<i64>, DbError> {
+        let sql = "SELECT userId FROM chatMembers \
+                   GROUP BY userId ORDER BY COUNT(*) DESC LIMIT 1";
+        match self.conn.query_row(sql, [], |r| r.get::<_, i64>(0)) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(DbError::QueryFailed(e.to_string())),
+        }
+    }
+
     // ── Search ──────────────────────────────────────────────
 
     /// Search messages by keyword (LIKE '%keyword%').

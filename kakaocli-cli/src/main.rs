@@ -445,15 +445,26 @@ fn cmd_messages_windows(
         }
     };
 
+    // My own userId (for is_from_me): --user-id override, else derive from
+    // chatMembers (I'm in every room → most-frequent member).
+    let own_uid = cli
+        .user_id
+        .map(|u| u as i64)
+        .or_else(|| room_db.windows_own_user_id().ok().flatten())
+        .unwrap_or(0);
+
     // Contact names (best-effort): TalkUserDB.talkUser → authorId map.
-    let names = dek::open_edb_from(&deks, &user_dir.join("TalkUserDB.edb"), uid)
+    let mut names = dek::open_edb_from(&deks, &user_dir.join("TalkUserDB.edb"), uid)
         .ok()
         .and_then(|db| db.talk_user_names().ok())
         .unwrap_or_default();
+    if own_uid != 0 {
+        names.entry(own_uid).or_insert_with(|| "나".to_string());
+    }
 
     // Open that chat's per-file message DB (its DEK must be resident).
     let log_file = format!("chatLogs_{}.edb", chat_id);
-    let db = dek::open_edb_from(&deks, &chat_data.join(&log_file), uid)
+    let db = dek::open_edb_from(&deks, &chat_data.join(&log_file), own_uid)
         .map_err(|e| format!("메시지 DB를 열 수 없습니다: {}", e))?;
     let mut msgs = db
         .messages_windows(chat_id, parse_since(since), limit)
