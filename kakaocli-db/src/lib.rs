@@ -110,8 +110,11 @@ impl Database {
             // using the compatibility mode active at key-set time. If compat is
             // set before key, SQLCipher uses its own default (v4: 256000/SHA512)
             // instead of KakaoTalk's v3 (64000/SHA1) → "file is not a database".
+            // cipher_log_level=NONE silences SQLCipher's stderr "hmac check failed"
+            // noise emitted while probing the wrong cipher_compatibility mode.
+            // (Unknown PRAGMAs are ignored by SQLite, so this is safe on any build.)
             let pragma_sql = format!(
-                "PRAGMA key = {}; PRAGMA cipher_compatibility = {};",
+                "PRAGMA cipher_log_level = NONE; PRAGMA key = {}; PRAGMA cipher_compatibility = {};",
                 key_literal, compat
             );
 
