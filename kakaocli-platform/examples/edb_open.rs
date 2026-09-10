@@ -25,6 +25,17 @@ fn main() {
         match kakaocli_db::Database::open_raw_key(f, &dek, 0) {
             Ok(db) => {
                 println!("  ✅ {}", name);
+                // KAKAO_SQL 지정 시 임의 읽기 조회 실행 (실측용).
+                if let Ok(sql) = std::env::var("KAKAO_SQL") {
+                    match db.raw_query(&sql) {
+                        Ok(v) => println!(
+                            "       [KAKAO_SQL] {}",
+                            serde_json::to_string(&v).unwrap_or_default()
+                        ),
+                        Err(e) => println!("       [KAKAO_SQL] err: {}", e),
+                    }
+                    continue;
+                }
                 // Full schema (CREATE statements reveal columns).
                 match db.raw_query(
                     "SELECT type || ' ' || name || ': ' || COALESCE(sql,'') \

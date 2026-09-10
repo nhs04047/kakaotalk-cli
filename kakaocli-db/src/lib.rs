@@ -332,6 +332,94 @@ impl Database {
         Ok(min.map(|m| m - 1))
     }
 
+    // ── Windows schema (per-file DBs) ───────────────────────
+
+    /// Windows: list chat rooms from `chatListInfo.edb`'s `chatRoomList` table.
+    /// Different schema from macOS `NTChatRoom` — see docs. No member-name join
+    /// (Windows keeps contact names in a separate DB), so `directChatMemberId`
+    /// rooms fall back to the stored title.
+    pub fn list_chats_windows(&self, limit: u32) -> Result<Vec<Chat>, DbError> {
+        let sql = "\
+            SELECT chatId, type, chatRoomTitle, activeMembersCount, \
+                   newMessageCount, lastLogId, lastUpdatedAt \
+            FROM chatRoomList \
+            ORDER BY lastUpdatedAt DESC \
+            LIMIT ?";
+
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                let type_str: Option<String> = row.get(1)?;
+                let title: Option<String> = row.get(2)?;
+                let chat_type = ChatType::from_windows(type_str.as_deref().unwrap_or(""));
+                let display_name = title
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| "(제목 없음)".to_string());
+                Ok(Chat {
+                    id: row.get(0)?,
+                    chat_type,
+                    display_name,
+                    member_count: row.get::<_, Option<i32>>(3)?.unwrap_or(0),
+                    last_message_id: row.get::<_, Option<i64>>(5)?,
+                    last_message_at: row.get::<_, Option<i64>>(6)?,
+                    unread_count: row.get::<_, Option<i32>>(4)?.unwrap_or(0),
+                })
+            })
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        Ok(rows)
+    }
+
+    /// Windows: messages from a `chatLogs_<chatId>.edb`'s `chatLogs` table.
+    /// The file is a single chat, so `chat_id` is passed through for the model.
+    /// No sender-name join (contact names live elsewhere) → `sender_name` is None.
+    pub fn messages_windows(
+        &self,
+        chat_id: i64,
+        since: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<Message>, DbError> {
+        let sql = "\
+            SELECT logId, authorId, message, type, sendAt \
+            FROM chatLogs \
+            WHERE (deleted IS NULL OR deleted = 0) \
+              AND (? IS NULL OR sendAt >= ?) \
+            ORDER BY sendAt DESC \
+            LIMIT ?";
+
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let my_uid = self.my_user_id;
+        let rows = stmt
+            .query_map(params![since, since, limit], |row| {
+                let author_id: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
+                Ok(Message {
+                    id: row.get(0)?,
+                    chat_id,
+                    sender_id: author_id,
+                    sender_name: None,
+                    text: row.get(2)?,
+                    message_type: MessageType::from(row.get::<_, Option<i32>>(3)?.unwrap_or(0)),
+                    created_at: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    is_from_me: author_id == my_uid,
+                })
+            })
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        Ok(rows)
+    }
+
     // ── Search ──────────────────────────────────────────────
 
     /// Search messages by keyword (LIKE '%keyword%').

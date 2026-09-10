@@ -276,12 +276,42 @@ pub fn clear_cached_user_id() {
     let _ = std::fs::remove_file(user_id_cache_path());
 }
 
-/// Windows: KakaoTalk chat_data directory
-pub fn windows_chat_data_path() -> PathBuf {
+/// Windows: `%LOCALAPPDATA%\Kakao\KakaoTalk` base directory.
+pub fn windows_kakao_base() -> PathBuf {
     let local_app_data = std::env::var("LOCALAPPDATA")
         .unwrap_or_else(|_| r"C:\Users\Default\AppData\Local".into());
-    PathBuf::from(local_app_data)
-        .join(r"Kakao\KakaoTalk\chat_data")
+    PathBuf::from(local_app_data).join(r"Kakao\KakaoTalk")
+}
+
+/// Windows: per-user directory `...\KakaoTalk\users\<40hex>`.
+///
+/// KakaoTalk 26.x stores each logged-in account under a 40-hex (SHA-1) subdir of
+/// `users\`, identified by a `keystore.bin` file. Returns the first such dir.
+pub fn windows_user_dir() -> Option<PathBuf> {
+    let users = windows_kakao_base().join("users");
+    let entries = std::fs::read_dir(&users).ok()?;
+    let mut candidate = None;
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            if p.join("keystore.bin").exists() {
+                return Some(p); // definitive
+            }
+            if candidate.is_none() && p.join("chat_data").is_dir() {
+                candidate = Some(p); // fallback: has chat_data
+            }
+        }
+    }
+    candidate
+}
+
+/// Windows: KakaoTalk `chat_data` directory (under the per-user dir on 26.x).
+/// Falls back to the legacy flat `...\KakaoTalk\chat_data` when no user dir is found.
+pub fn windows_chat_data_path() -> PathBuf {
+    match windows_user_dir() {
+        Some(dir) => dir.join("chat_data"),
+        None => windows_kakao_base().join("chat_data"),
+    }
 }
 
 /// Windows: find all .edb files in chat_data

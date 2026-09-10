@@ -31,6 +31,18 @@ impl ChatType {
             _ => Self::Unknown(raw),
         }
     }
+
+    /// Windows KakaoTalk stores the chat type as a string in `chatRoomList.type`.
+    /// Observed values: DirectChat, MultiChat, MemoChat, PlusChat, OM.
+    pub fn from_windows(s: &str) -> Self {
+        match s {
+            "DirectChat" => Self::Direct,
+            "MultiChat" => Self::Group,
+            "MemoChat" => Self::SelfChat,
+            "OM" | "PlusChat" => Self::Open,
+            _ => Self::Unknown(-1),
+        }
+    }
 }
 
 /// KakaoTalk message
