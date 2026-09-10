@@ -14,6 +14,8 @@ mod windows;
 pub use windows::WindowsBackend as Platform;
 #[cfg(target_os = "windows")]
 pub mod dek;
+#[cfg(target_os = "windows")]
+pub(crate) mod winsend;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod stub;

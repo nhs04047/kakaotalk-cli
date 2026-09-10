@@ -46,16 +46,8 @@ impl PlatformBackend for WindowsBackend {
             .map_err(|e| PlatformError::Other(e.to_string()))
     }
 
-    fn send_message(_chat_name: &str, _text: &str) -> Result<(), PlatformError> {
-        // TODO: Implement UIAutomation send flow
-        // 1. FindWindow → KakaoTalk main window
-        // 2. IUIAutomation Tree → find chat ListItem by name
-        // 3. InvokePattern → open chat
-        // 4. Verify opened chat title matches expected name
-        // 5. SendKeys for text input
-        // 6. InvokePattern → send button
-
-        Err(PlatformError::Other("Windows send not yet implemented".into()))
+    fn send_message(chat_name: &str, text: &str) -> Result<(), PlatformError> {
+        crate::winsend::send_message(chat_name, text)
     }
 
     fn dump_ax_tree(_chat: Option<&str>, _max_depth: u32) -> Result<AxNode, PlatformError> {
