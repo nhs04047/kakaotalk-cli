@@ -525,7 +525,117 @@ fn cmd_messages_unix(cli: &Cli, chat: Option<&str>, since: Option<&str>, limit: 
     Ok(())
 }
 
+/// Windows search. Messages are per-file (chatLogs_<id>.edb), so a message
+/// search opens every resident chat and aggregates. Rooms/friends come from
+/// chatListInfo / TalkUserDB.
+#[cfg(windows)]
+fn cmd_find_windows(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, friends: bool, all: bool) -> Result<(), String> {
+    use kakaocli_platform::dek;
+
+    let user_dir = kakaocli_core::db_path::windows_user_dir()
+        .ok_or_else(|| "KakaoTalk 사용자 디렉터리를 찾지 못했습니다.".to_string())?;
+    let chat_data = user_dir.join("chat_data");
+    let deks = dek::scan_deks(&user_dir).map_err(|e| format!("DEK 스캔 실패: {}", e))?;
+
+    let room_db = dek::open_edb_from(&deks, &chat_data.join("chatListInfo.edb"), 0)
+        .map_err(|e| format!("채팅방 목록을 열 수 없습니다: {}", e))?;
+    let chats = room_db
+        .list_chats_windows(9999)
+        .map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
+    let own_uid = room_db.windows_own_user_id().ok().flatten().unwrap_or(0);
+
+    let mut names = dek::open_edb_from(&deks, &user_dir.join("TalkUserDB.edb"), 0)
+        .ok()
+        .and_then(|db| db.talk_user_names().ok())
+        .unwrap_or_default();
+    if own_uid != 0 {
+        names.entry(own_uid).or_insert_with(|| "나".to_string());
+    }
+
+    // --rooms: 방 제목 검색
+    if rooms {
+        let hits: Vec<Chat> = chats
+            .iter()
+            .filter(|c| c.display_name.contains(keyword))
+            .cloned()
+            .collect();
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&hits).map_err(|e| e.to_string())?);
+        } else {
+            display::print_chats(&hits);
+        }
+        return Ok(());
+    }
+
+    // --friends: 연락처 이름 검색
+    if friends {
+        let hits: Vec<Friend> = names
+            .iter()
+            .filter(|(_, n)| n.contains(keyword))
+            .map(|(id, n)| Friend {
+                user_id: *id,
+                nick_name: Some(n.clone()),
+                friend_nick_name: None,
+                display_name: Some(n.clone()),
+            })
+            .collect();
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&hits).map_err(|e| e.to_string())?);
+        } else {
+            display::print_friends(&hits);
+        }
+        return Ok(());
+    }
+
+    // 기본/--all: 상주 chatLogs 전체를 순회 검색
+    let _ = all;
+    let mut results: Vec<Message> = Vec::new();
+    for fname in deks.keys() {
+        if let Some(rest) = fname.strip_prefix("chatLogs_") {
+            let chat_id: i64 = rest.trim_end_matches(".edb").parse().unwrap_or(0);
+            if let Ok(db) = dek::open_edb_from(&deks, &chat_data.join(fname), own_uid) {
+                if let Ok(msgs) = db.search_messages_windows(chat_id, keyword, 50) {
+                    for mut m in msgs {
+                        m.sender_name = names.get(&m.sender_id).cloned();
+                        results.push(m);
+                    }
+                }
+            }
+        }
+    }
+
+    // exact/regex 추가 필터 (Rust)
+    if exact {
+        results.retain(|m| m.text.as_deref() == Some(keyword));
+    }
+    if regex {
+        let re = regex::Regex::new(keyword).map_err(|e| format!("잘못된 정규식: {}", e))?;
+        results.retain(|m| m.text.as_deref().map(|t| re.is_match(t)).unwrap_or(false));
+    }
+    results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    results.truncate(50);
+
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?);
+    } else {
+        display::print_search_messages(&results, keyword);
+    }
+    Ok(())
+}
+
 fn cmd_find(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, friends: bool, all: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return cmd_find_windows(cli, keyword, exact, regex, rooms, friends, all);
+    }
+    #[cfg(not(windows))]
+    {
+        cmd_find_unix(cli, keyword, exact, regex, rooms, friends, all)
+    }
+}
+
+#[cfg(not(windows))]
+fn cmd_find_unix(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, friends: bool, all: bool) -> Result<(), String> {
     let db = open_db(cli)?;
 
     if all {
