@@ -711,7 +711,13 @@ fn cmd_find_unix(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool
 }
 
 fn cmd_query(cli: &Cli, sql: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    let db = {
+        cmd_query_open_windows(cli)?
+    };
+    #[cfg(not(windows))]
     let db = open_db(cli)?;
+
     let result = db.raw_query(sql).map_err(|e| format!("쿼리 실패: {}", e))?;
 
     if cli.json {
@@ -721,6 +727,33 @@ fn cmd_query(cli: &Cli, sql: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Windows: raw query targets one `.edb` (default `chatListInfo.edb`; override
+/// the filename with `--db-path`, resolved under the user dir / chat_data).
+#[cfg(windows)]
+fn cmd_query_open_windows(cli: &Cli) -> Result<kakaocli_db::Database, String> {
+    use kakaocli_platform::dek;
+
+    let user_dir = kakaocli_core::db_path::windows_user_dir()
+        .ok_or_else(|| "KakaoTalk 사용자 디렉터리를 찾지 못했습니다.".to_string())?;
+    let chat_data = user_dir.join("chat_data");
+    let file = cli.db_path.as_deref().unwrap_or("chatListInfo.edb");
+
+    // Resolve the target path: absolute, else chat_data/<file>, else user_dir/<file>.
+    let path = {
+        let p = std::path::Path::new(file);
+        if p.is_absolute() && p.exists() {
+            p.to_path_buf()
+        } else if chat_data.join(file).exists() {
+            chat_data.join(file)
+        } else {
+            user_dir.join(file)
+        }
+    };
+
+    let deks = dek::scan_deks(&user_dir).map_err(|e| format!("DEK 스캔 실패: {}", e))?;
+    dek::open_edb_from(&deks, &path, 0).map_err(|e| format!("DB를 열 수 없습니다: {}", e))
 }
 
 // ── Sync ────────────────────────────────────────────────────
