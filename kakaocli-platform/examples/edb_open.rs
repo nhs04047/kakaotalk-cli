@@ -23,10 +23,29 @@ fn main() {
     for f in &files {
         let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         match kakaocli_db::Database::open_raw_key(f, &dek, 0) {
-            Ok(db) => match db.verify_tables() {
-                Ok(tables) => println!("  ✅ {:<32} tables: {}", name, tables.join(", ")),
-                Err(e) => println!("  ⚠️  {:<32} opened but verify failed: {}", name, e),
-            },
+            Ok(db) => {
+                println!("  ✅ {}", name);
+                // Full schema (CREATE statements reveal columns).
+                match db.raw_query(
+                    "SELECT type || ' ' || name || ': ' || COALESCE(sql,'') \
+                     FROM sqlite_master WHERE type IN ('table','index') ORDER BY type,name",
+                ) {
+                    Ok(v) => {
+                        if let Some(arr) = v.as_array() {
+                            for row in arr {
+                                if let Some(obj) = row.as_object() {
+                                    for val in obj.values() {
+                                        if let Some(s) = val.as_str() {
+                                            println!("       {}", s);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => println!("       schema query err: {}", e),
+                }
+            }
             Err(_) => println!("  ✗  {:<32} (이 DEK로 안 열림)", name),
         }
     }

@@ -185,7 +185,10 @@ mod win {
 
         let mut tested: HashSet<[u8; 32]> = HashSet::new();
         let mut cands = 0usize;
-        let mut hit: Option<([u8; 32], String, usize)> = None;
+        let total_files = oracle.files.len();
+        // file name → (dek, reserved). Collect ALL resident DEKs (don't stop early).
+        let mut found: std::collections::BTreeMap<String, ([u8; 32], usize)> =
+            std::collections::BTreeMap::new();
 
         walk_anchored(handle, |key| {
             cands += 1;
@@ -193,31 +196,28 @@ mod win {
                 return false;
             }
             if let Some((name, r)) = oracle.test_key(key) {
-                hit = Some((*key, name.to_string(), r));
-                return true; // stop
+                found.entry(name.to_string()).or_insert((*key, r));
             }
-            false
+            // stop once every loaded file has a DEK, else keep scanning
+            found.len() == total_files
         });
 
         unsafe {
             let _ = CloseHandle(handle);
         }
 
-        match hit {
-            Some((key, name, r)) => {
-                println!("\n✅ DEK 발견! (매칭 파일 {}, reserved={})", name, r);
-                println!("   DEK : {}", hex_encode(&key));
-                println!("   후보 {}개 검사, 고유 {}개", cands, tested.len());
-            }
-            None => {
-                println!(
-                    "\n❌ DEK 없음. 앵커 후보 {}개(고유 {}개) 검사, {}개 .edb 어느 것도 못 엶.",
-                    cands,
-                    tested.len(),
-                    oracle.files.len()
-                );
-                println!("   → 채팅방이 하나도 안 열려 있으면 DEK가 메모리에 없을 수 있음.");
-            }
+        println!(
+            "\n앵커 후보 {}개(고유 {}개) 검사, {}/{} 파일의 DEK 발견:\n",
+            cands,
+            tested.len(),
+            found.len(),
+            total_files
+        );
+        for (name, (key, r)) in &found {
+            println!("  {:<34} r={:<3} DEK={}", name, r, hex_encode(key));
+        }
+        if found.is_empty() {
+            println!("  (없음 — 열린 채팅방이 없으면 DEK가 메모리에 없을 수 있음)");
         }
     }
 
