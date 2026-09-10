@@ -12,6 +12,8 @@ pub use darwin::DarwinBackend as Platform;
 mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::WindowsBackend as Platform;
+#[cfg(target_os = "windows")]
+pub mod dek;
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod stub;

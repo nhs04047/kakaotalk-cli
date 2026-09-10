@@ -359,19 +359,145 @@ fn cmd_auth(cli: &Cli) -> Result<(), String> {
 }
 
 fn cmd_chats(cli: &Cli, limit: u32) -> Result<(), String> {
-    let db = open_db(cli)?;
-    let chats = db.list_chats(limit).map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
+    #[cfg(windows)]
+    {
+        return cmd_chats_windows(cli, limit);
+    }
+    #[cfg(not(windows))]
+    {
+        let db = open_db(cli)?;
+        let chats = db.list_chats(limit).map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
+
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&chats).map_err(|e| e.to_string())?);
+        } else {
+            display::print_chats(&chats);
+        }
+
+        Ok(())
+    }
+}
+
+/// Windows read path: DEK 스캔 → chatListInfo.edb 복사·복호화 → chatRoomList.
+#[cfg(windows)]
+fn windows_my_uid(cli: &Cli) -> i64 {
+    cli.user_id.map(|u| u as i64).unwrap_or(0)
+}
+
+#[cfg(windows)]
+fn cmd_chats_windows(cli: &Cli, limit: u32) -> Result<(), String> {
+    let chat_data = kakaocli_core::db_path::windows_chat_data_path();
+    let uid = windows_my_uid(cli);
+    let db = kakaocli_platform::dek::open_edb(&chat_data, "chatListInfo.edb", uid)
+        .map_err(|e| format!("채팅방 목록을 열 수 없습니다: {}", e))?;
+    let chats = db
+        .list_chats_windows(limit)
+        .map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
 
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&chats).map_err(|e| e.to_string())?);
     } else {
         display::print_chats(&chats);
     }
+    Ok(())
+}
 
+#[cfg(windows)]
+fn cmd_messages_windows(
+    cli: &Cli,
+    chat: Option<&str>,
+    since: Option<&str>,
+    limit: u32,
+) -> Result<(), String> {
+    use kakaocli_platform::dek;
+
+    let user_dir = kakaocli_core::db_path::windows_user_dir()
+        .ok_or_else(|| "KakaoTalk 사용자 디렉터리를 찾지 못했습니다 (로그인 상태 확인).".to_string())?;
+    let chat_data = user_dir.join("chat_data");
+    let uid = windows_my_uid(cli);
+
+    // Scan every resident DEK once (covers chatListInfo, TalkUserDB, chatLogs).
+    let deks = dek::scan_deks(&user_dir).map_err(|e| format!("DEK 스캔 실패: {}", e))?;
+
+    // Resolve chat name → chatId via chatListInfo.
+    let room_db = dek::open_edb_from(&deks, &chat_data.join("chatListInfo.edb"), uid)
+        .map_err(|e| format!("채팅방 목록을 열 수 없습니다: {}", e))?;
+    let chats = room_db
+        .list_chats_windows(999)
+        .map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
+
+    let (chat_id, chat_name) = match chat {
+        Some(name) => {
+            let m = chats
+                .iter()
+                .find(|c| c.display_name.contains(name))
+                .ok_or_else(|| {
+                    format!("'{}' 채팅방을 찾지 못했습니다. 이름 없이 실행하면 목록에서 고를 수 있어요.", name)
+                })?;
+            (m.id, m.display_name.clone())
+        }
+        None => {
+            let choices: Vec<ChatChoice> = chats.into_iter().map(ChatChoice).collect();
+            let sel = inquire::Select::new("채팅방을 선택하세요:", choices)
+                .prompt()
+                .map_err(|e| format!("채팅방 선택이 취소되었습니다: {}", e))?;
+            (sel.0.id, sel.0.display_name)
+        }
+    };
+
+    // My own userId (for is_from_me): --user-id override, else derive from
+    // chatMembers (I'm in every room → most-frequent member).
+    let own_uid = cli
+        .user_id
+        .map(|u| u as i64)
+        .or_else(|| room_db.windows_own_user_id().ok().flatten())
+        .unwrap_or(0);
+
+    // Contact names (best-effort): TalkUserDB.talkUser → authorId map.
+    let mut names = dek::open_edb_from(&deks, &user_dir.join("TalkUserDB.edb"), uid)
+        .ok()
+        .and_then(|db| db.talk_user_names().ok())
+        .unwrap_or_default();
+    if own_uid != 0 {
+        names.entry(own_uid).or_insert_with(|| "나".to_string());
+    }
+
+    // Open that chat's per-file message DB (its DEK must be resident).
+    let log_file = format!("chatLogs_{}.edb", chat_id);
+    let db = dek::open_edb_from(&deks, &chat_data.join(&log_file), own_uid)
+        .map_err(|e| format!("메시지 DB를 열 수 없습니다: {}", e))?;
+    let mut msgs = db
+        .messages_windows(chat_id, parse_since(since), limit)
+        .map_err(|e| format!("메시지 조회 실패: {}", e))?;
+
+    // Fill sender names from the contact map.
+    for m in &mut msgs {
+        if m.sender_name.is_none() {
+            m.sender_name = names.get(&m.sender_id).cloned();
+        }
+    }
+
+    if cli.json {
+        println!("{}", serde_json::to_string_pretty(&msgs).map_err(|e| e.to_string())?);
+    } else {
+        display::print_messages(&msgs, &chat_name);
+    }
     Ok(())
 }
 
 fn cmd_messages(cli: &Cli, chat: Option<&str>, since: Option<&str>, limit: u32) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return cmd_messages_windows(cli, chat, since, limit);
+    }
+    #[cfg(not(windows))]
+    {
+        cmd_messages_unix(cli, chat, since, limit)
+    }
+}
+
+#[cfg(not(windows))]
+fn cmd_messages_unix(cli: &Cli, chat: Option<&str>, since: Option<&str>, limit: u32) -> Result<(), String> {
     let db = open_db(cli)?;
 
     // Resolve chat name to chat ID (interactive pick when omitted)

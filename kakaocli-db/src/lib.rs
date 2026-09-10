@@ -110,8 +110,11 @@ impl Database {
             // using the compatibility mode active at key-set time. If compat is
             // set before key, SQLCipher uses its own default (v4: 256000/SHA512)
             // instead of KakaoTalk's v3 (64000/SHA1) → "file is not a database".
+            // cipher_log_level=NONE silences SQLCipher's stderr "hmac check failed"
+            // noise emitted while probing the wrong cipher_compatibility mode.
+            // (Unknown PRAGMAs are ignored by SQLite, so this is safe on any build.)
             let pragma_sql = format!(
-                "PRAGMA key = {}; PRAGMA cipher_compatibility = {};",
+                "PRAGMA cipher_log_level = NONE; PRAGMA key = {}; PRAGMA cipher_compatibility = {};",
                 key_literal, compat
             );
 
@@ -330,6 +333,136 @@ impl Database {
             .query_row(sql, params![since_ts, chat_id, chat_id], |row| row.get(0))
             .map_err(|e| DbError::QueryFailed(e.to_string()))?;
         Ok(min.map(|m| m - 1))
+    }
+
+    // ── Windows schema (per-file DBs) ───────────────────────
+
+    /// Windows: list chat rooms from `chatListInfo.edb`'s `chatRoomList` table.
+    /// Different schema from macOS `NTChatRoom` — see docs. No member-name join
+    /// (Windows keeps contact names in a separate DB), so `directChatMemberId`
+    /// rooms fall back to the stored title.
+    pub fn list_chats_windows(&self, limit: u32) -> Result<Vec<Chat>, DbError> {
+        let sql = "\
+            SELECT chatId, type, chatRoomTitle, activeMembersCount, \
+                   newMessageCount, lastLogId, lastUpdatedAt \
+            FROM chatRoomList \
+            ORDER BY lastUpdatedAt DESC \
+            LIMIT ?";
+
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let rows = stmt
+            .query_map(params![limit], |row| {
+                let type_str: Option<String> = row.get(1)?;
+                let title: Option<String> = row.get(2)?;
+                let chat_type = ChatType::from_windows(type_str.as_deref().unwrap_or(""));
+                let display_name = title
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| "(제목 없음)".to_string());
+                Ok(Chat {
+                    id: row.get(0)?,
+                    chat_type,
+                    display_name,
+                    member_count: row.get::<_, Option<i32>>(3)?.unwrap_or(0),
+                    last_message_id: row.get::<_, Option<i64>>(5)?,
+                    last_message_at: row.get::<_, Option<i64>>(6)?,
+                    unread_count: row.get::<_, Option<i32>>(4)?.unwrap_or(0),
+                })
+            })
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        Ok(rows)
+    }
+
+    /// Windows: messages from a `chatLogs_<chatId>.edb`'s `chatLogs` table.
+    /// The file is a single chat, so `chat_id` is passed through for the model.
+    /// No sender-name join (contact names live elsewhere) → `sender_name` is None.
+    pub fn messages_windows(
+        &self,
+        chat_id: i64,
+        since: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<Message>, DbError> {
+        let sql = "\
+            SELECT logId, authorId, message, type, sendAt \
+            FROM chatLogs \
+            WHERE (deleted IS NULL OR deleted = 0) \
+              AND (? IS NULL OR sendAt >= ?) \
+            ORDER BY sendAt DESC \
+            LIMIT ?";
+
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let my_uid = self.my_user_id;
+        let rows = stmt
+            .query_map(params![since, since, limit], |row| {
+                let author_id: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
+                Ok(Message {
+                    id: row.get(0)?,
+                    chat_id,
+                    sender_id: author_id,
+                    sender_name: None,
+                    text: row.get(2)?,
+                    message_type: MessageType::from(row.get::<_, Option<i32>>(3)?.unwrap_or(0)),
+                    created_at: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    is_from_me: author_id == my_uid,
+                })
+            })
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        Ok(rows)
+    }
+
+    /// Windows: `userId → display name` map from `TalkUserDB.edb`'s `talkUser`
+    /// table (the NTUser equivalent). Used to resolve message `authorId` to a
+    /// name, since Windows keeps contacts in a separate DB from messages.
+    pub fn talk_user_names(&self) -> Result<std::collections::HashMap<i64, String>, DbError> {
+        let sql = "SELECT userId, COALESCE(NULLIF(friendNickName,''), nickName) \
+                   FROM talkUser WHERE linkId = 0";
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let uid: i64 = row.get::<_, Option<i64>>(0)?.unwrap_or(0);
+                let name: Option<String> = row.get(1)?;
+                Ok((uid, name))
+            })
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let mut map = std::collections::HashMap::new();
+        for r in rows {
+            let (uid, name) = r.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            if let Some(n) = name.filter(|s| !s.is_empty()) {
+                map.entry(uid).or_insert(n);
+            }
+        }
+        Ok(map)
+    }
+
+    /// Windows: derive the user's own `userId` from `chatListInfo.edb`. The user
+    /// is a member of every room, so the most-frequent `chatMembers.userId` is
+    /// them. Used to set `is_from_me` when reading messages.
+    pub fn windows_own_user_id(&self) -> Result<Option<i64>, DbError> {
+        let sql = "SELECT userId FROM chatMembers \
+                   GROUP BY userId ORDER BY COUNT(*) DESC LIMIT 1";
+        match self.conn.query_row(sql, [], |r| r.get::<_, i64>(0)) {
+            Ok(v) => Ok(Some(v)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(DbError::QueryFailed(e.to_string())),
+        }
     }
 
     // ── Search ──────────────────────────────────────────────

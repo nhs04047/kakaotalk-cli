@@ -4,3 +4,5 @@
 winbuild.ps1
 winbuild.bat
 wintest.log
+winrun.ps1
+winrun.log
