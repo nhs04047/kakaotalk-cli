@@ -420,6 +420,35 @@ impl Database {
         Ok(rows)
     }
 
+    /// Windows: `userId → display name` map from `TalkUserDB.edb`'s `talkUser`
+    /// table (the NTUser equivalent). Used to resolve message `authorId` to a
+    /// name, since Windows keeps contacts in a separate DB from messages.
+    pub fn talk_user_names(&self) -> Result<std::collections::HashMap<i64, String>, DbError> {
+        let sql = "SELECT userId, COALESCE(NULLIF(friendNickName,''), nickName) \
+                   FROM talkUser WHERE linkId = 0";
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                let uid: i64 = row.get::<_, Option<i64>>(0)?.unwrap_or(0);
+                let name: Option<String> = row.get(1)?;
+                Ok((uid, name))
+            })
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+
+        let mut map = std::collections::HashMap::new();
+        for r in rows {
+            let (uid, name) = r.map_err(|e| DbError::QueryFailed(e.to_string()))?;
+            if let Some(n) = name.filter(|s| !s.is_empty()) {
+                map.entry(uid).or_insert(n);
+            }
+        }
+        Ok(map)
+    }
+
     // ── Search ──────────────────────────────────────────────
 
     /// Search messages by keyword (LIKE '%keyword%').

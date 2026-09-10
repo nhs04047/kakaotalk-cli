@@ -199,17 +199,42 @@ pub fn open_edb(
     file_name: &str,
     my_uid: i64,
 ) -> Result<kakaocli_db::Database, PlatformError> {
-    let dek = scan_dek_for(chat_data, file_name)?.ok_or_else(|| {
-        PlatformError::Other(format!(
-            "{} 의 DEK가 메모리에 없습니다 — KakaoTalk에서 해당 항목/채팅방을 한 번 열어주세요.",
-            file_name
-        ))
-    })?;
+    let dek = scan_dek_for(chat_data, file_name)?.ok_or_else(|| dek_missing(file_name))?;
     let src = chat_data.join(file_name);
-    let tmp = copy_edb_to_temp(&src)
-        .map_err(|e| PlatformError::Other(format!("복사 실패({}): {}", file_name, e)))?;
-    kakaocli_db::Database::open_raw_key(&tmp, &hex_encode(&dek), my_uid)
-        .map_err(|e| PlatformError::Other(format!("복호화 실패({}): {}", file_name, e)))
+    open_with_dek(&src, &dek, my_uid)
+}
+
+/// 사전 스캔된 DEK 맵으로 `file_path`를 연다 (여러 파일을 한 번의 스캔으로 열 때).
+pub fn open_edb_from(
+    deks: &HashMap<String, [u8; 32]>,
+    file_path: &Path,
+    my_uid: i64,
+) -> Result<kakaocli_db::Database, PlatformError> {
+    let name = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| PlatformError::Other("잘못된 파일 경로".into()))?;
+    let dek = deks.get(name).ok_or_else(|| dek_missing(name))?;
+    open_with_dek(file_path, dek, my_uid)
+}
+
+fn dek_missing(file_name: &str) -> PlatformError {
+    PlatformError::Other(format!(
+        "{} 의 DEK가 메모리에 없습니다 — KakaoTalk에서 해당 항목/채팅방을 한 번 열어주세요.",
+        file_name
+    ))
+}
+
+fn open_with_dek(
+    src: &Path,
+    dek: &[u8; 32],
+    my_uid: i64,
+) -> Result<kakaocli_db::Database, PlatformError> {
+    let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+    let tmp = copy_edb_to_temp(src)
+        .map_err(|e| PlatformError::Other(format!("복사 실패({}): {}", name, e)))?;
+    kakaocli_db::Database::open_raw_key(&tmp, &hex_encode(dek), my_uid)
+        .map_err(|e| PlatformError::Other(format!("복호화 실패({}): {}", name, e)))
 }
 
 fn find_pid(name: &str) -> Option<u32> {

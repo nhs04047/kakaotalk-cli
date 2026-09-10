@@ -409,11 +409,18 @@ fn cmd_messages_windows(
     since: Option<&str>,
     limit: u32,
 ) -> Result<(), String> {
-    let chat_data = kakaocli_core::db_path::windows_chat_data_path();
+    use kakaocli_platform::dek;
+
+    let user_dir = kakaocli_core::db_path::windows_user_dir()
+        .ok_or_else(|| "KakaoTalk 사용자 디렉터리를 찾지 못했습니다 (로그인 상태 확인).".to_string())?;
+    let chat_data = user_dir.join("chat_data");
     let uid = windows_my_uid(cli);
 
+    // Scan every resident DEK once (covers chatListInfo, TalkUserDB, chatLogs).
+    let deks = dek::scan_deks(&user_dir).map_err(|e| format!("DEK 스캔 실패: {}", e))?;
+
     // Resolve chat name → chatId via chatListInfo.
-    let room_db = kakaocli_platform::dek::open_edb(&chat_data, "chatListInfo.edb", uid)
+    let room_db = dek::open_edb_from(&deks, &chat_data.join("chatListInfo.edb"), uid)
         .map_err(|e| format!("채팅방 목록을 열 수 없습니다: {}", e))?;
     let chats = room_db
         .list_chats_windows(999)
@@ -438,13 +445,26 @@ fn cmd_messages_windows(
         }
     };
 
+    // Contact names (best-effort): TalkUserDB.talkUser → authorId map.
+    let names = dek::open_edb_from(&deks, &user_dir.join("TalkUserDB.edb"), uid)
+        .ok()
+        .and_then(|db| db.talk_user_names().ok())
+        .unwrap_or_default();
+
     // Open that chat's per-file message DB (its DEK must be resident).
     let log_file = format!("chatLogs_{}.edb", chat_id);
-    let db = kakaocli_platform::dek::open_edb(&chat_data, &log_file, uid)
+    let db = dek::open_edb_from(&deks, &chat_data.join(&log_file), uid)
         .map_err(|e| format!("메시지 DB를 열 수 없습니다: {}", e))?;
-    let msgs = db
+    let mut msgs = db
         .messages_windows(chat_id, parse_since(since), limit)
         .map_err(|e| format!("메시지 조회 실패: {}", e))?;
+
+    // Fill sender names from the contact map.
+    for m in &mut msgs {
+        if m.sender_name.is_none() {
+            m.sender_name = names.get(&m.sender_id).cloned();
+        }
+    }
 
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&msgs).map_err(|e| e.to_string())?);
