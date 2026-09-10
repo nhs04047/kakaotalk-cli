@@ -237,6 +237,11 @@ fn open_with_dek(
         .map_err(|e| PlatformError::Other(format!("복호화 실패({}): {}", name, e)))
 }
 
+/// 실행 중 KakaoTalk.exe의 PID (UIAutomation 등에서 재사용).
+pub fn find_kakao_pid() -> Option<u32> {
+    find_pid(TARGET)
+}
+
 fn find_pid(name: &str) -> Option<u32> {
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
