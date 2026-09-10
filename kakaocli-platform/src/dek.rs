@@ -167,6 +167,51 @@ pub fn scan_dek_for(edb_dir: &Path, file_name: &str) -> Result<Option<[u8; 32]>,
     Ok(scan_deks(edb_dir)?.get(file_name).copied())
 }
 
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// 라이브 `.edb`(+ `-wal`/`-shm`)를 임시 폴더로 복사한다. KakaoTalk이 파일을
+/// 락하므로 읽기 전에 복사한다. **원본은 절대 건드리지 않는다(읽기 전용).**
+pub fn copy_edb_to_temp(src: &Path) -> std::io::Result<std::path::PathBuf> {
+    let name = src
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
+    let dir = std::env::temp_dir().join("kakaocli");
+    std::fs::create_dir_all(&dir)?;
+    let dst = dir.join(name);
+    std::fs::copy(src, &dst)?;
+    for ext in ["-wal", "-shm"] {
+        let sidecar = src.with_file_name(format!("{}{}", name.to_string_lossy(), ext));
+        if sidecar.exists() {
+            if let Some(fname) = sidecar.file_name() {
+                let _ = std::fs::copy(&sidecar, dir.join(fname));
+            }
+        }
+    }
+    Ok(dst)
+}
+
+/// `chat_data/<file_name>`의 DEK를 스캔하고, 락 회피를 위해 임시 복사한 뒤
+/// SQLCipher raw-key로 연다. DEK가 메모리에 없으면(채팅방 미개방) 안내 에러.
+pub fn open_edb(
+    chat_data: &Path,
+    file_name: &str,
+    my_uid: i64,
+) -> Result<kakaocli_db::Database, PlatformError> {
+    let dek = scan_dek_for(chat_data, file_name)?.ok_or_else(|| {
+        PlatformError::Other(format!(
+            "{} 의 DEK가 메모리에 없습니다 — KakaoTalk에서 해당 항목/채팅방을 한 번 열어주세요.",
+            file_name
+        ))
+    })?;
+    let src = chat_data.join(file_name);
+    let tmp = copy_edb_to_temp(&src)
+        .map_err(|e| PlatformError::Other(format!("복사 실패({}): {}", file_name, e)))?;
+    kakaocli_db::Database::open_raw_key(&tmp, &hex_encode(&dek), my_uid)
+        .map_err(|e| PlatformError::Other(format!("복호화 실패({}): {}", file_name, e)))
+}
+
 fn find_pid(name: &str) -> Option<u32> {
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?;
