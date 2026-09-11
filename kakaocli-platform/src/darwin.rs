@@ -428,15 +428,36 @@ fn find_self_chat_row(
 ) -> Result<accessibility::AXUIElement, PlatformError> {
     let rows = get_visible_rows(chat_list)?;
     for row in &rows {
-        // AXAttribute::description() returns CFString
-        if let Ok(desc) = row.attribute(&AXAttribute::description()) {
-            let desc_str: String = desc.to_string();
-            if desc_str.contains("badge me") || desc_str.contains("Self-chat") || desc_str.contains("Notes") {
-                return Ok(row.clone());
-            }
+        // The self-chat "badge me" marker lives on a descendant node (AXImage
+        // inside the row's AXCell), NOT on the row itself — so search descendants.
+        if element_has_self_chat_marker(row, 5) {
+            return Ok(row.clone());
         }
     }
     Err(PlatformError::UiError("Self-chat 'badge me' row not found".into()))
+}
+
+/// Whether an element or any descendant (up to `max_depth`) carries the self-chat
+/// marker in its AXDescription. KakaoTalk tags the self-chat row's image with
+/// "badge me"; older builds used "Self-chat"/"Notes".
+fn element_has_self_chat_marker(el: &accessibility::AXUIElement, max_depth: u32) -> bool {
+    if let Ok(desc) = el.attribute(&AXAttribute::description()) {
+        let d: String = desc.to_string();
+        if d.contains("badge me") || d.contains("Self-chat") || d.contains("Notes") {
+            return true;
+        }
+    }
+    if max_depth == 0 {
+        return false;
+    }
+    if let Ok(children) = el.attribute(&AXAttribute::children()) {
+        for child in children.iter() {
+            if element_has_self_chat_marker(&child, max_depth - 1) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Whether a chat query refers to the user's own self-chat ("나와의 채팅").
