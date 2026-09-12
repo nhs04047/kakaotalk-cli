@@ -384,6 +384,41 @@ fn windows_my_uid(cli: &Cli) -> i64 {
     cli.user_id.map(|u| u as i64).unwrap_or(0)
 }
 
+/// Windows: send 대상 방 이름 해석. `--me`는 자기채팅(MemoChat) 제목으로, 이름
+/// 생략 시 chatRoomList에서 인터랙티브 선택. (send는 열린 창을 제목으로 찾음.)
+#[cfg(windows)]
+fn windows_resolve_send_target(cli: &Cli, chat_name: Option<&str>, me: bool) -> Result<String, String> {
+    if !me {
+        if let Some(name) = chat_name {
+            return Ok(name.to_string());
+        }
+    }
+
+    let user_dir = kakaocli_core::db_path::windows_user_dir()
+        .ok_or_else(|| "KakaoTalk 사용자 디렉터리를 찾지 못했습니다.".to_string())?;
+    let chat_data = user_dir.join("chat_data");
+    let uid = windows_my_uid(cli);
+    let db = kakaocli_platform::dek::open_edb(&chat_data, "chatListInfo.edb", uid)
+        .map_err(|e| format!("채팅방 목록을 열 수 없습니다: {}", e))?;
+    let chats = db
+        .list_chats_windows(9999)
+        .map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
+
+    if me {
+        let self_chat = chats
+            .iter()
+            .find(|c| c.chat_type == ChatType::SelfChat)
+            .ok_or_else(|| "자기채팅(나와의 채팅)을 찾지 못했습니다.".to_string())?;
+        return Ok(self_chat.display_name.clone());
+    }
+
+    let choices: Vec<ChatChoice> = chats.into_iter().map(ChatChoice).collect();
+    let sel = inquire::Select::new("채팅방을 선택하세요:", choices)
+        .prompt()
+        .map_err(|e| format!("채팅방 선택이 취소되었습니다: {}", e))?;
+    Ok(sel.0.display_name)
+}
+
 #[cfg(windows)]
 fn cmd_chats_windows(cli: &Cli, limit: u32) -> Result<(), String> {
     let chat_data = kakaocli_core::db_path::windows_chat_data_path();
@@ -952,6 +987,9 @@ fn cmd_send(
     yes: bool,
 ) -> Result<(), String> {
     // Resolve target chat (interactive pick when omitted and not sending to self)
+    #[cfg(windows)]
+    let target_name = windows_resolve_send_target(cli, chat_name, me)?;
+    #[cfg(not(windows))]
     let target_name = if me {
         "_".to_string()
     } else {
