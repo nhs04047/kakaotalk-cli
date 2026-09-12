@@ -4,41 +4,28 @@
 // - windows-rs crate docs
 
 use crate::*;
-use kakaocli_core::db_path;
 use kakaocli_core::model::DbKey;
 
 pub struct WindowsBackend;
 
 impl PlatformBackend for WindowsBackend {
     fn resolve_db_key(_user_id: Option<u64>) -> Result<DbKey, PlatformError> {
-        // TODO: DEK scanner via windows-rs
-        // 1. Find KakaoTalk.exe PID (CreateToolhelp32Snapshot)
-        // 2. OpenProcess(PROCESS_VM_READ)
-        // 3. Scan heap for 32-byte DEK candidates
-        // 4. Verify each candidate with BCrypt AES-256 page-1 oracle
-        // 5. Cache verified DEK
-
-        let db_path = db_path::windows_edb_files()
-            .first()
-            .cloned()
-            .ok_or_else(|| PlatformError::Other("No .edb files found in chat_data".into()))?;
-
+        // Windows uses **per-file DEKs** captured from process memory (see
+        // `crate::dek`), not a single derived key + path. Read commands go
+        // through `dek::open_edb`; this single-key entry point does not apply.
         Err(PlatformError::Other(
-            "Windows DEK scanner not yet implemented".into(),
+            "이 명령은 아직 Windows에서 지원되지 않습니다 (Windows는 파일별 DEK 사용 — chats/msg/find/query/send/auth/check 참고).".into(),
         ))
     }
 
     fn check_status() -> Result<AppStatus, PlatformError> {
-        // Check if KakaoTalk.exe is running
-        // Check if .edb files exist
-        let edb_exists = db_path::windows_edb_files().first().is_some();
-
-        if !edb_exists {
-            return Ok(AppStatus::NotRunning);
+        // On Windows the DEK lives only in the running process's memory, so
+        // reading requires KakaoTalk to be running. Not running → can't decrypt.
+        if crate::dek::find_kakao_pid().is_some() {
+            Ok(AppStatus::Ready)
+        } else {
+            Ok(AppStatus::NotRunning)
         }
-
-        // TODO: check if KakaoTalk.exe process exists
-        Ok(AppStatus::DbAccessible) // placeholder
     }
 
     fn login(email: &str, password: &str) -> Result<(), PlatformError> {

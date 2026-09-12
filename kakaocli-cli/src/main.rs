@@ -280,6 +280,7 @@ impl std::fmt::Display for ChatChoice {
 }
 
 /// Interactively pick a chat room from the DB's chat list.
+#[cfg_attr(windows, allow(dead_code))]
 fn pick_chat_interactive(db: &Database) -> Result<(i64, String), String> {
     let chats = db
         .list_chats(200)
@@ -338,6 +339,31 @@ fn cmd_check(cli: &Cli) -> Result<(), String> {
     }
 }
 
+#[cfg(windows)]
+fn cmd_auth(cli: &Cli) -> Result<(), String> {
+    use kakaocli_platform::dek;
+    let user_dir = kakaocli_core::db_path::windows_user_dir()
+        .ok_or_else(|| "KakaoTalk 사용자 디렉터리를 찾지 못했습니다 (로그인 상태 확인).".to_string())?;
+    let chat_data = user_dir.join("chat_data");
+
+    let deks = with_spinner("DEK 스캔 중... (KakaoTalk 메모리)", || {
+        dek::scan_deks(&user_dir).map_err(|e| format!("DEK 스캔 실패: {}", e))
+    })?;
+    let db = dek::open_edb_from(&deks, &chat_data.join("chatListInfo.edb"), 0)
+        .map_err(|e| format!("복호화 검증 실패: {}", e))?;
+    let tables = db.verify_tables().map_err(|e| format!("테이블 확인 실패: {}", e))?;
+
+    println!("{}", display::style_success("✅ 복호화 성공!"));
+    println!("   상주 DEK {}개, chatListInfo 테이블 {}개", deks.len(), tables.len());
+    if cli.verbose {
+        for t in &tables {
+            println!("   - {}", t);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
 fn cmd_auth(cli: &Cli) -> Result<(), String> {
     // Verify DB can be opened (may trigger a slow userId SHA-512 역산 on macOS)
     let db = with_spinner(

@@ -7,7 +7,6 @@
 //! 안전: 전송 전 창 제목을 재확인(다른 방 오발송 방지). 채팅창이 열려 있지 않으면
 //! 안내 에러(자동 열기는 커스텀 UI라 별도 과제).
 
-use std::ffi::c_void;
 use std::mem::size_of;
 use std::thread::sleep;
 use std::time::Duration;

@@ -207,6 +207,7 @@ pub fn print_messages(messages: &[Message], chat_name: &str) {
 }
 
 /// Print a slice of messages with a title.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn print_messages_slice(messages: &[&Message], title: &str) {
     if messages.is_empty() {
         println!("{}", style_warn(&format!("'{}'에 대한 결과가 없습니다.", title)));
@@ -256,6 +257,7 @@ pub fn print_search_messages(messages: &[Message], keyword: &str) {
 }
 
 /// Print combined search results.
+#[cfg_attr(windows, allow(dead_code))]
 pub fn print_search_all(results: &SearchResults, keyword: &str) {
     let mut any = false;
 
