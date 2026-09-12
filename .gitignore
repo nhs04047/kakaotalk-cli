@@ -1,5 +1,17 @@
 /target/
 **/*.rs.bk
+
+# 시크릿/민감 정보 (전사 보안 정책)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# 의존성/빌드 결과물
+node_modules/
+dist/
 # Windows 로컬 빌드 스크립트/로그 (개발 편의, 커밋 제외)
 winbuild.ps1
 winbuild.bat
