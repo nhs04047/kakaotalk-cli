@@ -6,20 +6,17 @@
 /// - Path functions work on all platforms (returns correct paths for the target OS).
 /// - Linux compiles but only `mac_container_path()` and `windows_chat_data_path()`
 ///   format tests are meaningful.
-
 use std::path::PathBuf;
 
 /// macOS: KakaoTalk container directory
 pub fn mac_container_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/Shared".into());
-    PathBuf::from(home)
-        .join("Library/Containers/com.kakao.KakaoTalkMac/Data")
+    PathBuf::from(home).join("Library/Containers/com.kakao.KakaoTalkMac/Data")
 }
 
 /// macOS: KakaoTalk database directory (Application Support subdirectory)
 pub fn mac_db_dir() -> PathBuf {
-    mac_container_path()
-        .join("Library/Application Support/com.kakao.KakaoTalkMac")
+    mac_container_path().join("Library/Application Support/com.kakao.KakaoTalkMac")
 }
 
 /// macOS: find all DB candidate files (78-char hex filenames in Application Support dir)
@@ -76,20 +73,16 @@ pub fn mac_user_id() -> Option<u64> {
         let hash_prefix = "DESIGNATEDFRIENDSREVISION:";
         let empty_hash = "31bca02094eb78126a517b206a88c73cfa9ec6f704c7030d18212cace820f025f00bf0ea68dbf3f3a5436ca63b53bf7bf80ad8d5de7d8359d0b7fed9dbc3ab99";
         let active_hash: Option<String> = dict.iter().find_map(|(key, val)| {
-            if key.starts_with(hash_prefix) {
-                let hash = &key[hash_prefix.len()..];
-                if hash == empty_hash {
-                    return None;
-                }
-                let is_nonzero = val
-                    .as_unsigned_integer()
-                    .map(|n| n > 0)
-                    .unwrap_or_else(|| val.as_real().map(|f| f != 0.0).unwrap_or(false));
-                if is_nonzero {
-                    Some(hash.to_string())
-                } else {
-                    None
-                }
+            let hash = key.strip_prefix(hash_prefix)?;
+            if hash == empty_hash {
+                return None;
+            }
+            let is_nonzero = val
+                .as_unsigned_integer()
+                .map(|n| n > 0)
+                .unwrap_or_else(|| val.as_real().map(|f| f != 0.0).unwrap_or(false));
+            if is_nonzero {
+                Some(hash.to_string())
             } else {
                 None
             }
@@ -101,8 +94,8 @@ pub fn mac_user_id() -> Option<u64> {
             // ~1-2 min on modern Mac (SHA-512 is fast).
             eprintln!("🔐 SHA-512 userId 역산 시작 (0..1,000,000,000, 멀티스레드)...");
             let start = std::time::Instant::now();
-            use ring::digest::{digest, SHA512};
             use rayon::prelude::*;
+            use ring::digest::{digest, SHA512};
             use std::sync::atomic::{AtomicU64, Ordering};
 
             let counter = AtomicU64::new(0);
@@ -110,19 +103,15 @@ pub fn mac_user_id() -> Option<u64> {
 
             let found = (0..max_id).into_par_iter().find_map_any(|candidate| {
                 let n = counter.fetch_add(1, Ordering::Relaxed);
-                if n % 50_000_000 == 0 {
+                if n.is_multiple_of(50_000_000) {
                     let elapsed = start.elapsed().as_secs();
-                    eprintln!(
-                        "⏳ {}M/1000M 진행 ({}초 경과)...",
-                        n / 1_000_000,
-                        elapsed
-                    );
+                    eprintln!("⏳ {}M/1000M 진행 ({}초 경과)...", n / 1_000_000, elapsed);
                 }
                 let id_str = candidate.to_string();
                 let computed = digest(&SHA512, id_str.as_bytes());
                 let computed_hex = hex::encode(computed.as_ref());
                 if computed_hex == active_hash {
-                    Some(candidate as u64)
+                    Some(candidate)
                 } else {
                     None
                 }
@@ -196,9 +185,7 @@ pub fn mac_platform_uuid() -> Option<String> {
                     let value_part = &after_equals[start + 1..];
                     if let Some(end) = value_part.find('"') {
                         let uuid = &value_part[..end];
-                        if uuid.len() == 36
-                            && uuid.chars().filter(|&c| c == '-').count() == 4
-                        {
+                        if uuid.len() == 36 && uuid.chars().filter(|&c| c == '-').count() == 4 {
                             return Some(uuid.to_string());
                         }
                     }
@@ -278,8 +265,8 @@ pub fn clear_cached_user_id() {
 
 /// Windows: `%LOCALAPPDATA%\Kakao\KakaoTalk` base directory.
 pub fn windows_kakao_base() -> PathBuf {
-    let local_app_data = std::env::var("LOCALAPPDATA")
-        .unwrap_or_else(|_| r"C:\Users\Default\AppData\Local".into());
+    let local_app_data =
+        std::env::var("LOCALAPPDATA").unwrap_or_else(|_| r"C:\Users\Default\AppData\Local".into());
     PathBuf::from(local_app_data).join(r"Kakao\KakaoTalk")
 }
 
@@ -325,11 +312,7 @@ pub fn windows_edb_files() -> Vec<PathBuf> {
             entries
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
-                .filter(|p| {
-                    p.extension()
-                        .map(|ext| ext == "edb")
-                        .unwrap_or(false)
-                })
+                .filter(|p| p.extension().map(|ext| ext == "edb").unwrap_or(false))
                 .collect()
         })
         .unwrap_or_default()

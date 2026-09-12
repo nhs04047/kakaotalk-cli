@@ -236,7 +236,9 @@ fn ensure_kakaotalk_running() -> Result<(), PlatformError> {
     }
 
     let workspace = NSWorkspace::sharedWorkspace();
-    if let Some(url) = workspace.URLForApplicationWithBundleIdentifier(&nsstring("com.kakao.KakaoTalkMac")) {
+    if let Some(url) =
+        workspace.URLForApplicationWithBundleIdentifier(&nsstring("com.kakao.KakaoTalkMac"))
+    {
         workspace.openURL(&url);
     } else {
         let path = nsstring("/Applications/KakaoTalk.app");
@@ -251,7 +253,9 @@ fn ensure_kakaotalk_running() -> Result<(), PlatformError> {
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
-    Err(PlatformError::Other("KakaoTalk did not launch within 15 seconds".into()))
+    Err(PlatformError::Other(
+        "KakaoTalk did not launch within 15 seconds".into(),
+    ))
 }
 
 fn check_login_interruption() -> Result<(), PlatformError> {
@@ -419,7 +423,8 @@ fn find_chat_row_with_scroll(
     }
 
     Err(PlatformError::UiError(format!(
-        "Chat '{}' not found in chat list (scrolled {} times)", name, max_scrolls
+        "Chat '{}' not found in chat list (scrolled {} times)",
+        name, max_scrolls
     )))
 }
 
@@ -434,7 +439,9 @@ fn find_self_chat_row(
             return Ok(row.clone());
         }
     }
-    Err(PlatformError::UiError("Self-chat 'badge me' row not found".into()))
+    Err(PlatformError::UiError(
+        "Self-chat 'badge me' row not found".into(),
+    ))
 }
 
 /// Whether an element or any descendant (up to `max_depth`) carries the self-chat
@@ -579,7 +586,8 @@ fn verify_chat_window(expected_name: &str) -> Result<(), PlatformError> {
     }
 
     Err(PlatformError::UiError(format!(
-        "'{}' 채팅창이 열리지 않았습니다", expected_name
+        "'{}' 채팅창이 열리지 않았습니다",
+        expected_name
     )))
 }
 
@@ -695,7 +703,11 @@ fn ax_build_tree(element: &accessibility::AXUIElement, max_depth: u32) -> AxNode
         .unwrap_or(false);
 
     let mut node = AxNode {
-        role: if role.is_empty() { "(no role)".into() } else { role },
+        role: if role.is_empty() {
+            "(no role)".into()
+        } else {
+            role
+        },
         title,
         description: desc,
         focused,
@@ -723,7 +735,10 @@ fn filter_ax_for_chat(root: AxNode, chat_name: &str) -> AxNode {
         .into_iter()
         .filter_map(|child| {
             let filtered = filter_ax_for_chat(child, chat_name);
-            if filtered.title.is_empty() && filtered.description.is_empty() && filtered.children.is_empty() {
+            if filtered.title.is_empty()
+                && filtered.description.is_empty()
+                && filtered.children.is_empty()
+            {
                 None
             } else {
                 Some(filtered)
@@ -732,9 +747,16 @@ fn filter_ax_for_chat(root: AxNode, chat_name: &str) -> AxNode {
         .collect();
 
     if self_matches || !filtered_children.is_empty() {
-        AxNode { children: filtered_children, ..root }
+        AxNode {
+            children: filtered_children,
+            ..root
+        }
     } else {
-        AxNode { role: root.role, children: Vec::new(), ..AxNode::new("") }
+        AxNode {
+            role: root.role,
+            children: Vec::new(),
+            ..AxNode::new("")
+        }
     }
 }
 #[cfg(test)]

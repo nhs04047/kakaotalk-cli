@@ -47,7 +47,7 @@ fn save_to(path: &Path, chat_id: Option<i64>, last_log_id: i64) -> std::io::Resu
         .unwrap_or_default();
     cp.0.insert(scope_key(chat_id), last_log_id);
     let json = serde_json::to_string_pretty(&cp)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     std::fs::write(path, json)
 }
 

@@ -126,14 +126,17 @@ impl Database {
                 continue;
             }
 
-            match conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get::<_, i64>(0)) {
+            match conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| {
+                row.get::<_, i64>(0)
+            }) {
                 Ok(_) => {
                     tracing::debug!("SQLCipher opened with cipher_compatibility={}", compat);
                     return Ok(Self { conn, my_user_id });
                 }
                 Err(e) => {
                     last_error = DbError::DatabaseOpenFailed(format!(
-                        "Key rejected with cipher_compatibility={}: {}", compat, e
+                        "Key rejected with cipher_compatibility={}: {}",
+                        compat, e
                     ));
                     drop(conn);
                 }
@@ -536,7 +539,9 @@ impl Database {
     /// Windows sync: current max `logId` in a `chatLogs` file (baseline). 0 if empty.
     pub fn max_log_id_windows(&self) -> Result<i64, DbError> {
         self.conn
-            .query_row("SELECT COALESCE(MAX(logId), 0) FROM chatLogs", [], |r| r.get(0))
+            .query_row("SELECT COALESCE(MAX(logId), 0) FROM chatLogs", [], |r| {
+                r.get(0)
+            })
             .map_err(|e| DbError::QueryFailed(e.to_string()))
     }
 
@@ -728,8 +733,7 @@ impl Database {
         let rows: Vec<Value> = stmt
             .query_map([], |row| {
                 let mut map = serde_json::Map::new();
-                for i in 0..column_count {
-                    let name = &column_names[i];
+                for (i, name) in column_names.iter().enumerate() {
                     if let Ok(val) = row.get::<_, String>(i) {
                         map.insert(name.clone(), Value::String(val));
                     } else if let Ok(val) = row.get::<_, i64>(i) {
@@ -757,7 +761,10 @@ impl Database {
     /// On ambiguity, returns the first match — caller should check for this.
     pub fn resolve_chat_id(&self, name: &str) -> Result<Option<(i64, String)>, DbError> {
         let chats = self.list_chats(999999)?;
-        let matched: Vec<&Chat> = chats.iter().filter(|c| c.display_name.contains(name)).collect();
+        let matched: Vec<&Chat> = chats
+            .iter()
+            .filter(|c| c.display_name.contains(name))
+            .collect();
 
         match matched.first() {
             None => Ok(None),
@@ -859,7 +866,10 @@ mod tests {
         // key가 앞에 오고 compat가 뒤에 온다
         let key_pos = pragma_sql.find("PRAGMA key").unwrap();
         let compat_pos = pragma_sql.find("PRAGMA cipher_compatibility").unwrap();
-        assert!(key_pos < compat_pos, "key must precede cipher_compatibility");
+        assert!(
+            key_pos < compat_pos,
+            "key must precede cipher_compatibility"
+        );
         // 명시적 파라미터가 포함된다
         assert!(pragma_sql.contains(&format!("key = '{}'", key_hex)));
         assert!(pragma_sql.contains("cipher_compatibility = 3"));
@@ -874,8 +884,11 @@ mod tests {
         drop(conn);
 
         // This will fail to open (no SQLCipher key), but we construct manually
-        let conn_read = Connection::open_with_flags(&tmp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        conn_read.execute_batch("CREATE TABLE IF NOT EXISTS x (a int)").ok();
+        let conn_read =
+            Connection::open_with_flags(&tmp, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        conn_read
+            .execute_batch("CREATE TABLE IF NOT EXISTS x (a int)")
+            .ok();
         drop(conn_read);
         std::fs::remove_file(&tmp).ok();
     }
@@ -913,7 +926,10 @@ mod tests {
             )
             .unwrap();
         }
-        Database { conn, my_user_id: my_uid }
+        Database {
+            conn,
+            my_user_id: my_uid,
+        }
     }
 
     #[test]
@@ -957,7 +973,10 @@ mod tests {
 
     #[test]
     fn test_messages_after_is_from_me() {
-        let db = sync_test_db(&[(1, 1, 100, "mine", 1, 1), (2, 1, 999, "theirs", 1, 2)], 100);
+        let db = sync_test_db(
+            &[(1, 1, 100, "mine", 1, 1), (2, 1, 999, "theirs", 1, 2)],
+            100,
+        );
         let msgs = db.messages_after(0, None, 100).unwrap();
         assert!(msgs[0].is_from_me);
         assert!(!msgs[1].is_from_me);
@@ -969,7 +988,11 @@ mod tests {
         assert_eq!(empty.max_log_id(None).unwrap(), 0);
 
         let db = sync_test_db(
-            &[(5, 10, 1, "a", 1, 1), (9, 20, 1, "b", 1, 2), (7, 10, 1, "c", 1, 3)],
+            &[
+                (5, 10, 1, "a", 1, 1),
+                (9, 20, 1, "b", 1, 2),
+                (7, 10, 1, "c", 1, 3),
+            ],
             1,
         );
         assert_eq!(db.max_log_id(None).unwrap(), 9);

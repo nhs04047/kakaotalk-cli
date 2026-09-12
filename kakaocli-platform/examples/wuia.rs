@@ -28,8 +28,6 @@ mod win {
         EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     };
 
-    static mut BUF: Vec<HWND> = Vec::new();
-
     pub fn run() {
         let pid = match kakaocli_platform::dek::find_kakao_pid() {
             Some(p) => p,
@@ -82,7 +80,10 @@ mod win {
             .and_then(|s| s.parse().ok())
             .unwrap_or(5);
 
-        println!("\n=== UIA 트리 (메인창 0x{:X}, depth {}) ===", hwnd.0 as usize, depth);
+        println!(
+            "\n=== UIA 트리 (메인창 0x{:X}, depth {}) ===",
+            hwnd.0 as usize, depth
+        );
         unsafe {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             let auto: IUIAutomation =
@@ -111,17 +112,18 @@ mod win {
         }
     }
 
-    unsafe extern "system" fn enum_proc(hwnd: HWND, _l: LPARAM) -> BOOL {
-        BUF.push(hwnd);
+    unsafe extern "system" fn enum_proc(hwnd: HWND, l: LPARAM) -> BOOL {
+        let out = &mut *(l.0 as *mut Vec<HWND>);
+        out.push(hwnd);
         BOOL(1)
     }
 
     fn enum_top_windows() -> Vec<HWND> {
+        let mut out: Vec<HWND> = Vec::new();
         unsafe {
-            BUF.clear();
-            let _ = EnumWindows(Some(enum_proc), LPARAM(0));
-            BUF.clone()
+            let _ = EnumWindows(Some(enum_proc), LPARAM(&mut out as *mut Vec<HWND> as isize));
         }
+        out
     }
 
     fn window_text(h: HWND) -> String {

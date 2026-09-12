@@ -5,7 +5,8 @@
 //! 뒤 입력창에 포커스를 주고 유니코드 키 입력 + Enter로 전송한다.
 //!
 //! 안전: 전송 전 창 제목을 재확인(다른 방 오발송 방지). 채팅창이 열려 있지 않으면
-//! 안내 에러(자동 열기는 커스텀 UI라 별도 과제).
+//! 메인 창 검색창(dlg id 100)에 방 이름을 입력해 자동으로 연 뒤(open_chat),
+//! 제목 재검증을 거쳐 전송한다.
 
 use std::mem::size_of;
 use std::thread::sleep;
@@ -93,7 +94,10 @@ fn enum_chat_windows(pid: u32) -> Vec<(HWND, String)> {
         pid: u32,
         out: Vec<(HWND, String)>,
     }
-    let mut ctx = Ctx { pid, out: Vec::new() };
+    let mut ctx = Ctx {
+        pid,
+        out: Vec::new(),
+    };
 
     unsafe extern "system" fn cb(h: HWND, l: LPARAM) -> BOOL {
         let ctx = &mut *(l.0 as *mut Ctx);
@@ -137,7 +141,11 @@ fn find_child_by_id(parent: HWND, id: i32) -> Option<HWND> {
     }
 
     unsafe {
-        let _ = EnumChildWindows(Some(parent), Some(cb), LPARAM(&mut ctx as *mut Ctx as isize));
+        let _ = EnumChildWindows(
+            Some(parent),
+            Some(cb),
+            LPARAM(&mut ctx as *mut Ctx as isize),
+        );
     }
     ctx.found
 }
@@ -154,7 +162,8 @@ fn find_main_window(pid: u32) -> Option<HWND> {
         let ctx = &mut *(l.0 as *mut Ctx);
         let mut wpid = 0u32;
         GetWindowThreadProcessId(h, Some(&mut wpid));
-        if wpid == ctx.pid && class_name(h) == "EVA_Window_Dblclk" && window_text(h) == "카카오톡" {
+        if wpid == ctx.pid && class_name(h) == "EVA_Window_Dblclk" && window_text(h) == "카카오톡"
+        {
             ctx.found = Some(h);
             return BOOL(0); // stop
         }

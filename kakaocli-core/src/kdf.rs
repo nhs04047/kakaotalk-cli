@@ -8,14 +8,12 @@
 ///   PRAGMA key = '<256-char-hex>'
 /// (kakaocli Swift: `PRAGMA KEY='<hex>'` — SQLCipher re-derives internally.)
 /// Do NOT truncate to 32 bytes — that would yield a different key.
-
 use ring::digest::{digest, SHA1_FOR_LEGACY_USE_ONLY, SHA256};
 use ring::pbkdf2;
 use std::num::NonZeroU32;
 
 /// PBKDF2 iterations: 100,000 (matches kakaocli)
-const PBKDF2_ITERATIONS: NonZeroU32 =
-    NonZeroU32::new(100_000).expect("100k is non-zero");
+const PBKDF2_ITERATIONS: NonZeroU32 = NonZeroU32::new(100_000).expect("100k is non-zero");
 /// PBKDF2 output length in bytes (kakaocli uses 128)
 const PBKDF2_OUTPUT_LEN: usize = 128;
 
@@ -43,9 +41,14 @@ pub fn derive_mac_key(user_id: u64, device_uuid: &str) -> String {
     // Build password: A + hashed_uuid + "|" + F + uuid[:5] + H + userId + "|" + uuid[7..]
     // joined with "F" between each part, then reversed
     let parts = [
-        "A", &hashed, "|",
-        "F", &uuid_str[..5.min(uuid_str.len())],
-        "H", &user_str, "|",
+        "A",
+        &hashed,
+        "|",
+        "F",
+        &uuid_str[..5.min(uuid_str.len())],
+        "H",
+        &user_str,
+        "|",
         &uuid_str[7.min(uuid_str.len())..],
     ];
     let hawawa = parts.join("F");
@@ -68,7 +71,7 @@ pub fn derive_mac_key(user_id: u64, device_uuid: &str) -> String {
 
     // Full 128 bytes → hex (256 chars) — passphrase for SQLCipher
     // (kakaocli Swift: derived.map { String(format: "%02x", $0) }.joined())
-    hex::encode(&output)
+    hex::encode(output)
 }
 
 /// Derive the encrypted database filename (hex string, no extension).
@@ -79,10 +82,7 @@ pub fn derive_mac_db_name(user_id: u64, device_uuid: &str) -> String {
 
     // Build password: . + F + userId + A + F + reversed_uuid + . + "|"
     // joined with "." between each part
-    let parts = [
-        ".", "F", &user_str, "A", "F",
-        &reversed_uuid, ".", "|",
-    ];
+    let parts = [".", "F", &user_str, "A", "F", &reversed_uuid, ".", "|"];
     let hawawa = parts.join(".");
 
     // Salt: reversed hashed device UUID

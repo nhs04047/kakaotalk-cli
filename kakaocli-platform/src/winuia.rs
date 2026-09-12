@@ -2,7 +2,6 @@
 //! macOS의 AX inspect에 대응. 커스텀 EVA UI라 대부분 Document로 노출되지만
 //! 커스텀 이름/AutomationId로 구조 파악 가능 (send 등 자동화 디버깅용).
 
-
 use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM};
 use windows::Win32::System::Com::{
@@ -45,7 +44,10 @@ fn find_window(pid: u32, chat: Option<&str>) -> Option<HWND> {
         pid: u32,
         out: Vec<(HWND, String)>,
     }
-    let mut ctx = Ctx { pid, out: Vec::new() };
+    let mut ctx = Ctx {
+        pid,
+        out: Vec::new(),
+    };
 
     unsafe extern "system" fn cb(h: HWND, l: LPARAM) -> BOOL {
         let ctx = &mut *(l.0 as *mut Ctx);
@@ -79,7 +81,9 @@ fn find_window(pid: u32, chat: Option<&str>) -> Option<HWND> {
 }
 
 unsafe fn build(walker: &IUIAutomationTreeWalker, el: &IUIAutomationElement, depth: u32) -> AxNode {
-    let mut node = AxNode::new(control_type_name(el.CurrentControlType().map(|c| c.0).unwrap_or(0)));
+    let mut node = AxNode::new(control_type_name(
+        el.CurrentControlType().map(|c| c.0).unwrap_or(0),
+    ));
     node.title = el.CurrentName().map(|b| b.to_string()).unwrap_or_default();
     node.description = el
         .CurrentAutomationId()
@@ -136,4 +140,3 @@ fn control_type_name(ct: i32) -> &'static str {
         _ => "Element",
     }
 }
-

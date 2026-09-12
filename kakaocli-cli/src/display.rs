@@ -210,7 +210,10 @@ pub fn print_messages(messages: &[Message], chat_name: &str) {
 #[cfg_attr(windows, allow(dead_code))]
 pub fn print_messages_slice(messages: &[&Message], title: &str) {
     if messages.is_empty() {
-        println!("{}", style_warn(&format!("'{}'에 대한 결과가 없습니다.", title)));
+        println!(
+            "{}",
+            style_warn(&format!("'{}'에 대한 결과가 없습니다.", title))
+        );
         return;
     }
 
@@ -295,7 +298,10 @@ pub fn print_search_all(results: &SearchResults, keyword: &str) {
     }
 
     if !any {
-        println!("{}", style_warn(&format!("'{}'에 대한 결과가 없습니다.", keyword)));
+        println!(
+            "{}",
+            style_warn(&format!("'{}'에 대한 결과가 없습니다.", keyword))
+        );
     }
 }
 

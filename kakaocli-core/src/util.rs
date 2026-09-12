@@ -46,8 +46,7 @@ mod tests {
 
     #[test]
     fn test_passes_through_result_type() {
-        let r: Option<Result<i32, String>> =
-            with_timeout(Duration::from_secs(1), || Ok(7));
+        let r: Option<Result<i32, String>> = with_timeout(Duration::from_secs(1), || Ok(7));
         assert_eq!(r, Some(Ok(7)));
     }
 }

@@ -98,9 +98,7 @@ enum Command {
     },
 
     /// Raw SQL 쿼리 (읽기 전용)
-    Query {
-        sql: String,
-    },
+    Query { sql: String },
 
     /// 메시지 전송 (Phase 2)
     #[command(aliases = ["say"])]
@@ -177,20 +175,42 @@ fn main() {
     let cli = Cli::parse();
 
     let result = match &cli.command {
-        Command::Check { .. } => cmd_check(&cli),
+        Command::Check => cmd_check(&cli),
         Command::Auth => cmd_auth(&cli),
         Command::Chats { limit } => cmd_chats(&cli, *limit),
         Command::Msg { chat, since, limit } => {
             cmd_messages(&cli, chat.as_deref(), since.as_deref(), *limit)
         }
-        Command::Find { keyword, exact, regex, rooms, friends, all } => {
-            cmd_find(&cli, keyword, *exact, *regex, *rooms, *friends, *all)
-        }
+        Command::Find {
+            keyword,
+            exact,
+            regex,
+            rooms,
+            friends,
+            all,
+        } => cmd_find(&cli, keyword, *exact, *regex, *rooms, *friends, *all),
         Command::Query { sql } => cmd_query(&cli, sql),
-        Command::Send { chat, message, me, dry_run, yes } => {
-            cmd_send(&cli, chat.as_deref(), message.as_deref(), *me, *dry_run, *yes)
-        }
-        Command::Sync { follow, interval, chat, webhook, since } => cmd_sync(
+        Command::Send {
+            chat,
+            message,
+            me,
+            dry_run,
+            yes,
+        } => cmd_send(
+            &cli,
+            chat.as_deref(),
+            message.as_deref(),
+            *me,
+            *dry_run,
+            *yes,
+        ),
+        Command::Sync {
+            follow,
+            interval,
+            chat,
+            webhook,
+            since,
+        } => cmd_sync(
             &cli,
             *follow,
             *interval,
@@ -199,9 +219,12 @@ fn main() {
             since.as_deref(),
         ),
         Command::Inspect { chat, depth } => cmd_inspect(&cli, chat.as_deref(), *depth),
-        Command::Login { email, password, status, clear } => {
-            cmd_login(&cli, email.as_deref(), password.as_deref(), *status, *clear)
-        }
+        Command::Login {
+            email,
+            password,
+            status,
+            clear,
+        } => cmd_login(&cli, email.as_deref(), password.as_deref(), *status, *clear),
     };
 
     if let Err(err) = result {
@@ -213,7 +236,10 @@ fn main() {
 // ── Helpers ────────────────────────────────────────────────
 
 fn not_implemented_yet(feature: &str) -> ! {
-    eprintln!("{}: 아직 구현되지 않았습니다 (docs/roadmap.md 참고)", feature);
+    eprintln!(
+        "{}: 아직 구현되지 않았습니다 (docs/roadmap.md 참고)",
+        feature
+    );
     std::process::exit(1);
 }
 
@@ -331,7 +357,10 @@ fn cmd_check(cli: &Cli) -> Result<(), String> {
             if cli.verbose {
                 let db_path = kakaocli_core::db_path::mac_container_path();
                 println!("  컨테이너: {}", db_path.display());
-                println!("  전체 디스크 접근: {}", kakaocli_core::db_path::check_full_disk_access());
+                println!(
+                    "  전체 디스크 접근: {}",
+                    kakaocli_core::db_path::check_full_disk_access()
+                );
             }
 
             Ok(())
@@ -343,8 +372,9 @@ fn cmd_check(cli: &Cli) -> Result<(), String> {
 #[cfg(windows)]
 fn cmd_auth(cli: &Cli) -> Result<(), String> {
     use kakaocli_platform::dek;
-    let user_dir = kakaocli_core::db_path::windows_user_dir()
-        .ok_or_else(|| "KakaoTalk 사용자 디렉터리를 찾지 못했습니다 (로그인 상태 확인).".to_string())?;
+    let user_dir = kakaocli_core::db_path::windows_user_dir().ok_or_else(|| {
+        "KakaoTalk 사용자 디렉터리를 찾지 못했습니다 (로그인 상태 확인).".to_string()
+    })?;
     let chat_data = user_dir.join("chat_data");
 
     let deks = with_spinner("DEK 스캔 중... (KakaoTalk 메모리)", || {
@@ -352,10 +382,16 @@ fn cmd_auth(cli: &Cli) -> Result<(), String> {
     })?;
     let db = dek::open_edb_from(&deks, &chat_data.join("chatListInfo.edb"), 0)
         .map_err(|e| format!("복호화 검증 실패: {}", e))?;
-    let tables = db.verify_tables().map_err(|e| format!("테이블 확인 실패: {}", e))?;
+    let tables = db
+        .verify_tables()
+        .map_err(|e| format!("테이블 확인 실패: {}", e))?;
 
     println!("{}", display::style_success("✅ 복호화 성공!"));
-    println!("   상주 DEK {}개, chatListInfo 테이블 {}개", deks.len(), tables.len());
+    println!(
+        "   상주 DEK {}개, chatListInfo 테이블 {}개",
+        deks.len(),
+        tables.len()
+    );
     if cli.verbose {
         for t in &tables {
             println!("   - {}", t);
@@ -371,7 +407,9 @@ fn cmd_auth(cli: &Cli) -> Result<(), String> {
         "DB 키 확인 중... (userId 역산이 필요하면 최대 1~2분 소요될 수 있습니다)",
         || open_db(cli),
     )?;
-    let tables = db.verify_tables().map_err(|e| format!("테이블 확인 실패: {}", e))?;
+    let tables = db
+        .verify_tables()
+        .map_err(|e| format!("테이블 확인 실패: {}", e))?;
 
     println!("{}", display::style_success("✅ 데이터베이스 열기 성공!"));
     println!("   테이블 {}개 발견", tables.len());
@@ -388,15 +426,20 @@ fn cmd_auth(cli: &Cli) -> Result<(), String> {
 fn cmd_chats(cli: &Cli, limit: u32) -> Result<(), String> {
     #[cfg(windows)]
     {
-        return cmd_chats_windows(cli, limit);
+        cmd_chats_windows(cli, limit)
     }
     #[cfg(not(windows))]
     {
         let db = open_db(cli)?;
-        let chats = db.list_chats(limit).map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
+        let chats = db
+            .list_chats(limit)
+            .map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
 
         if cli.json {
-            println!("{}", serde_json::to_string_pretty(&chats).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&chats).map_err(|e| e.to_string())?
+            );
         } else {
             display::print_chats(&chats);
         }
@@ -414,7 +457,11 @@ fn windows_my_uid(cli: &Cli) -> i64 {
 /// Windows: send 대상 방 이름 해석. `--me`는 자기채팅(MemoChat) 제목으로, 이름
 /// 생략 시 chatRoomList에서 인터랙티브 선택. (send는 열린 창을 제목으로 찾음.)
 #[cfg(windows)]
-fn windows_resolve_send_target(cli: &Cli, chat_name: Option<&str>, me: bool) -> Result<String, String> {
+fn windows_resolve_send_target(
+    cli: &Cli,
+    chat_name: Option<&str>,
+    me: bool,
+) -> Result<String, String> {
     if !me {
         if let Some(name) = chat_name {
             return Ok(name.to_string());
@@ -457,7 +504,10 @@ fn cmd_chats_windows(cli: &Cli, limit: u32) -> Result<(), String> {
         .map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
 
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&chats).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&chats).map_err(|e| e.to_string())?
+        );
     } else {
         display::print_chats(&chats);
     }
@@ -473,8 +523,9 @@ fn cmd_messages_windows(
 ) -> Result<(), String> {
     use kakaocli_platform::dek;
 
-    let user_dir = kakaocli_core::db_path::windows_user_dir()
-        .ok_or_else(|| "KakaoTalk 사용자 디렉터리를 찾지 못했습니다 (로그인 상태 확인).".to_string())?;
+    let user_dir = kakaocli_core::db_path::windows_user_dir().ok_or_else(|| {
+        "KakaoTalk 사용자 디렉터리를 찾지 못했습니다 (로그인 상태 확인).".to_string()
+    })?;
     let chat_data = user_dir.join("chat_data");
     let uid = windows_my_uid(cli);
 
@@ -540,17 +591,25 @@ fn cmd_messages_windows(
     }
 
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&msgs).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&msgs).map_err(|e| e.to_string())?
+        );
     } else {
         display::print_messages(&msgs, &chat_name);
     }
     Ok(())
 }
 
-fn cmd_messages(cli: &Cli, chat: Option<&str>, since: Option<&str>, limit: u32) -> Result<(), String> {
+fn cmd_messages(
+    cli: &Cli,
+    chat: Option<&str>,
+    since: Option<&str>,
+    limit: u32,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
-        return cmd_messages_windows(cli, chat, since, limit);
+        cmd_messages_windows(cli, chat, since, limit)
     }
     #[cfg(not(windows))]
     {
@@ -559,7 +618,12 @@ fn cmd_messages(cli: &Cli, chat: Option<&str>, since: Option<&str>, limit: u32) 
 }
 
 #[cfg(not(windows))]
-fn cmd_messages_unix(cli: &Cli, chat: Option<&str>, since: Option<&str>, limit: u32) -> Result<(), String> {
+fn cmd_messages_unix(
+    cli: &Cli,
+    chat: Option<&str>,
+    since: Option<&str>,
+    limit: u32,
+) -> Result<(), String> {
     let db = open_db(cli)?;
 
     // Resolve chat name to chat ID (interactive pick when omitted)
@@ -579,7 +643,10 @@ fn cmd_messages_unix(cli: &Cli, chat: Option<&str>, since: Option<&str>, limit: 
         .map_err(|e| format!("메시지 조회 실패: {}", e))?;
 
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&messages).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&messages).map_err(|e| e.to_string())?
+        );
     } else {
         display::print_messages(&messages, &chat_name);
     }
@@ -591,7 +658,15 @@ fn cmd_messages_unix(cli: &Cli, chat: Option<&str>, since: Option<&str>, limit: 
 /// search opens every resident chat and aggregates. Rooms/friends come from
 /// chatListInfo / TalkUserDB.
 #[cfg(windows)]
-fn cmd_find_windows(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, friends: bool, all: bool) -> Result<(), String> {
+fn cmd_find_windows(
+    cli: &Cli,
+    keyword: &str,
+    exact: bool,
+    regex: bool,
+    rooms: bool,
+    friends: bool,
+    all: bool,
+) -> Result<(), String> {
     use kakaocli_platform::dek;
 
     let user_dir = kakaocli_core::db_path::windows_user_dir()
@@ -622,7 +697,10 @@ fn cmd_find_windows(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: b
             .cloned()
             .collect();
         if cli.json {
-            println!("{}", serde_json::to_string_pretty(&hits).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&hits).map_err(|e| e.to_string())?
+            );
         } else {
             display::print_chats(&hits);
         }
@@ -642,7 +720,10 @@ fn cmd_find_windows(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: b
             })
             .collect();
         if cli.json {
-            println!("{}", serde_json::to_string_pretty(&hits).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&hits).map_err(|e| e.to_string())?
+            );
         } else {
             display::print_friends(&hits);
         }
@@ -674,21 +755,32 @@ fn cmd_find_windows(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: b
         let re = regex::Regex::new(keyword).map_err(|e| format!("잘못된 정규식: {}", e))?;
         results.retain(|m| m.text.as_deref().map(|t| re.is_match(t)).unwrap_or(false));
     }
-    results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    results.sort_by_key(|m| std::cmp::Reverse(m.created_at));
     results.truncate(50);
 
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?
+        );
     } else {
         display::print_search_messages(&results, keyword);
     }
     Ok(())
 }
 
-fn cmd_find(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, friends: bool, all: bool) -> Result<(), String> {
+fn cmd_find(
+    cli: &Cli,
+    keyword: &str,
+    exact: bool,
+    regex: bool,
+    rooms: bool,
+    friends: bool,
+    all: bool,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
-        return cmd_find_windows(cli, keyword, exact, regex, rooms, friends, all);
+        cmd_find_windows(cli, keyword, exact, regex, rooms, friends, all)
     }
     #[cfg(not(windows))]
     {
@@ -697,13 +789,26 @@ fn cmd_find(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, fri
 }
 
 #[cfg(not(windows))]
-fn cmd_find_unix(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool, friends: bool, all: bool) -> Result<(), String> {
+fn cmd_find_unix(
+    cli: &Cli,
+    keyword: &str,
+    exact: bool,
+    regex: bool,
+    rooms: bool,
+    friends: bool,
+    all: bool,
+) -> Result<(), String> {
     let db = open_db(cli)?;
 
     if all {
-        let results = db.search_all(keyword, 50).map_err(|e| format!("검색 실패: {}", e))?;
+        let results = db
+            .search_all(keyword, 50)
+            .map_err(|e| format!("검색 실패: {}", e))?;
         if cli.json {
-            println!("{}", serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?
+            );
         } else {
             display::print_search_all(&results, keyword);
         }
@@ -711,9 +816,14 @@ fn cmd_find_unix(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool
     }
 
     if rooms {
-        let results = db.search_rooms(keyword, 50).map_err(|e| format!("채팅방 검색 실패: {}", e))?;
+        let results = db
+            .search_rooms(keyword, 50)
+            .map_err(|e| format!("채팅방 검색 실패: {}", e))?;
         if cli.json {
-            println!("{}", serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?
+            );
         } else {
             display::print_chats(&results);
         }
@@ -721,9 +831,14 @@ fn cmd_find_unix(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool
     }
 
     if friends {
-        let results = db.search_friends(keyword, 50).map_err(|e| format!("친구 검색 실패: {}", e))?;
+        let results = db
+            .search_friends(keyword, 50)
+            .map_err(|e| format!("친구 검색 실패: {}", e))?;
         if cli.json {
-            println!("{}", serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?
+            );
         } else {
             display::print_friends(&results);
         }
@@ -733,13 +848,19 @@ fn cmd_find_unix(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool
     // Message search (default)
     if exact {
         // Use LIKE superset + filter in Rust
-        let results = db.search_messages(keyword, 200).map_err(|e| format!("검색 실패: {}", e))?;
-        let exact_results: Vec<&Message> = results.iter().filter(|m| {
-            m.text.as_deref() == Some(keyword)
-        }).collect();
+        let results = db
+            .search_messages(keyword, 200)
+            .map_err(|e| format!("검색 실패: {}", e))?;
+        let exact_results: Vec<&Message> = results
+            .iter()
+            .filter(|m| m.text.as_deref() == Some(keyword))
+            .collect();
 
         if cli.json {
-            println!("{}", serde_json::to_string_pretty(&exact_results).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&exact_results).map_err(|e| e.to_string())?
+            );
         } else {
             display::print_messages_slice(&exact_results, &format!("Exact: \"{}\"", keyword));
         }
@@ -748,13 +869,19 @@ fn cmd_find_unix(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool
 
     if regex {
         let re = regex::Regex::new(keyword).map_err(|e| format!("잘못된 정규식: {}", e))?;
-        let results = db.search_messages("", 200).map_err(|e| format!("검색 실패: {}", e))?;
-        let regex_results: Vec<&Message> = results.iter().filter(|m| {
-            m.text.as_deref().map(|t| re.is_match(t)).unwrap_or(false)
-        }).collect();
+        let results = db
+            .search_messages("", 200)
+            .map_err(|e| format!("검색 실패: {}", e))?;
+        let regex_results: Vec<&Message> = results
+            .iter()
+            .filter(|m| m.text.as_deref().map(|t| re.is_match(t)).unwrap_or(false))
+            .collect();
 
         if cli.json {
-            println!("{}", serde_json::to_string_pretty(&regex_results).map_err(|e| e.to_string())?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&regex_results).map_err(|e| e.to_string())?
+            );
         } else {
             display::print_messages_slice(&regex_results, &format!("Regex: /{}/", keyword));
         }
@@ -762,9 +889,14 @@ fn cmd_find_unix(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool
     }
 
     // Default: LIKE search
-    let results = db.search_messages(keyword, 50).map_err(|e| format!("검색 실패: {}", e))?;
+    let results = db
+        .search_messages(keyword, 50)
+        .map_err(|e| format!("검색 실패: {}", e))?;
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&results).map_err(|e| e.to_string())?
+        );
     } else {
         display::print_search_messages(&results, keyword);
     }
@@ -774,16 +906,17 @@ fn cmd_find_unix(cli: &Cli, keyword: &str, exact: bool, regex: bool, rooms: bool
 
 fn cmd_query(cli: &Cli, sql: &str) -> Result<(), String> {
     #[cfg(windows)]
-    let db = {
-        cmd_query_open_windows(cli)?
-    };
+    let db = { cmd_query_open_windows(cli)? };
     #[cfg(not(windows))]
     let db = open_db(cli)?;
 
     let result = db.raw_query(sql).map_err(|e| format!("쿼리 실패: {}", e))?;
 
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())?
+        );
     } else {
         display::print_query_result(&result);
     }
@@ -848,8 +981,10 @@ fn cmd_sync_windows(
         .list_chats_windows(9999)
         .map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
     let own_uid = room_db.windows_own_user_id().ok().flatten().unwrap_or(0);
-    let chat_name_map: HashMap<i64, String> =
-        chats.iter().map(|c| (c.id, c.display_name.clone())).collect();
+    let chat_name_map: HashMap<i64, String> = chats
+        .iter()
+        .map(|c| (c.id, c.display_name.clone()))
+        .collect();
 
     let mut names = dek::open_edb_from(&deks, &user_dir.join("TalkUserDB.edb"), 0)
         .ok()
@@ -884,7 +1019,10 @@ fn cmd_sync_windows(
         targets.retain(|(id, _)| *id == fid);
     }
     if targets.is_empty() {
-        return Err("감시할 채팅방이 없습니다 (해당 방을 KakaoTalk에서 열어 DEK를 상주시키세요).".to_string());
+        return Err(
+            "감시할 채팅방이 없습니다 (해당 방을 KakaoTalk에서 열어 DEK를 상주시키세요)."
+                .to_string(),
+        );
     }
 
     // baseline: 현재 max logId + mtime
@@ -955,8 +1093,10 @@ fn cmd_sync_windows(
                 emit_sync_message(cli, m, &chat_name_map, single);
             }
             if let (Some(client), Some(url)) = (webhook_client.as_ref(), webhook) {
-                let payload: Vec<serde_json::Value> =
-                    msgs.iter().map(|m| sync_message_json(m, &chat_name_map)).collect();
+                let payload: Vec<serde_json::Value> = msgs
+                    .iter()
+                    .map(|m| sync_message_json(m, &chat_name_map))
+                    .collect();
                 post_webhook(client, url, &payload);
             }
         }
@@ -992,7 +1132,7 @@ fn cmd_sync(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        return cmd_sync_windows(cli, follow, interval, chat, webhook, since);
+        cmd_sync_windows(cli, follow, interval, chat, webhook, since)
     }
     #[cfg(not(windows))]
     {
@@ -1019,7 +1159,10 @@ fn cmd_sync_unix(
             db.resolve_chat_id(name)
                 .map_err(|e| format!("채팅방 조회 실패: {}", e))?
                 .ok_or_else(|| {
-                    format!("'{}' 채팅방을 찾지 못했습니다. 이름 없이 실행하면 전체 방을 따라갑니다.", name)
+                    format!(
+                        "'{}' 채팅방을 찾지 못했습니다. 이름 없이 실행하면 전체 방을 따라갑니다.",
+                        name
+                    )
                 })?
                 .0,
         ),
@@ -1047,9 +1190,13 @@ fn cmd_sync_unix(
                 .map_err(|e| format!("기준선 조회 실패: {}", e))?
             {
                 Some(base) => base,
-                None => db.max_log_id(chat_id).map_err(|e| format!("기준선 조회 실패: {}", e))?,
+                None => db
+                    .max_log_id(chat_id)
+                    .map_err(|e| format!("기준선 조회 실패: {}", e))?,
             },
-            None => db.max_log_id(chat_id).map_err(|e| format!("기준선 조회 실패: {}", e))?,
+            None => db
+                .max_log_id(chat_id)
+                .map_err(|e| format!("기준선 조회 실패: {}", e))?,
         },
     };
 
@@ -1070,8 +1217,10 @@ fn cmd_sync_unix(
                 emit_sync_message(cli, m, &chat_names, single_room);
             }
             if let (Some(client), Some(url)) = (webhook_client.as_ref(), webhook) {
-                let payload: Vec<serde_json::Value> =
-                    batch.iter().map(|m| sync_message_json(m, &chat_names)).collect();
+                let payload: Vec<serde_json::Value> = batch
+                    .iter()
+                    .map(|m| sync_message_json(m, &chat_names))
+                    .collect();
                 post_webhook(client, url, &payload);
             }
 
@@ -1178,7 +1327,10 @@ fn cmd_inspect(cli: &Cli, chat: Option<&str>, depth: u32) -> Result<(), String> 
         .map_err(|e| format!("Inspect 실패: {}", e))?;
 
     if cli.json {
-        println!("{}", serde_json::to_string_pretty(&tree).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&tree).map_err(|e| e.to_string())?
+        );
     } else {
         display::print_ax_tree(&tree, 0);
     }
@@ -1258,7 +1410,13 @@ fn cmd_send(
     Ok(())
 }
 
-fn cmd_login(_cli: &Cli, email: Option<&str>, password: Option<&str>, status: bool, clear: bool) -> Result<(), String> {
+fn cmd_login(
+    _cli: &Cli,
+    email: Option<&str>,
+    password: Option<&str>,
+    status: bool,
+    clear: bool,
+) -> Result<(), String> {
     if clear {
         kakaocli_auth::clear_credentials().map_err(|e| format!("삭제 실패: {}", e))?;
         println!("저장된 인증 정보를 삭제했습니다.");
@@ -1267,7 +1425,8 @@ fn cmd_login(_cli: &Cli, email: Option<&str>, password: Option<&str>, status: bo
 
     if status {
         if kakaocli_auth::has_credentials() {
-            let (email, _) = kakaocli_auth::get_credentials().map_err(|e| format!("읽기 실패: {}", e))?;
+            let (email, _) =
+                kakaocli_auth::get_credentials().map_err(|e| format!("읽기 실패: {}", e))?;
             println!(
                 "{}",
                 display::style_success(&format!("✅ 저장된 계정: {}", email))
@@ -1327,6 +1486,9 @@ fn parse_since(since: Option<&str>) -> Option<i64> {
         return Some(dt.timestamp());
     }
 
-    eprintln!("Warning: Could not parse --since '{}'. Using all messages.", s);
+    eprintln!(
+        "Warning: Could not parse --since '{}'. Using all messages.",
+        s
+    );
     None
 }

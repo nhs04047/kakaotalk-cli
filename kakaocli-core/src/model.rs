@@ -119,7 +119,7 @@ pub struct AuthResult {
 /// Database key (macOS: derived, Windows: scanned from process memory)
 #[derive(Debug, Clone)]
 pub struct DbKey {
-    pub key_hex: String,  // 64-char hex string
+    pub key_hex: String, // 64-char hex string
     pub db_path: std::path::PathBuf,
 }
 
