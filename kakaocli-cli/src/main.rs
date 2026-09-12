@@ -835,7 +835,7 @@ fn cmd_sync_windows(
     use kakaocli_platform::dek;
     use std::time::SystemTime;
 
-    let _ = since; // Windows sync v1: --since 미지원(현재 max부터 신규만)
+    let since_ts = parse_since(since); // None이면 현재 max부터(신규만)
 
     let user_dir = kakaocli_core::db_path::windows_user_dir()
         .ok_or_else(|| "KakaoTalk 사용자 디렉터리를 찾지 못했습니다.".to_string())?;
@@ -892,25 +892,37 @@ fn cmd_sync_windows(
     let mut mtimes: HashMap<i64, Option<SystemTime>> = HashMap::new();
     for (id, fname) in &targets {
         if let Ok(db) = dek::open_edb_from(&deks, &chat_data.join(fname), own_uid) {
-            last.insert(*id, db.max_log_id_windows().unwrap_or(0));
+            let baseline = match since_ts {
+                Some(ts) => db
+                    .log_id_before_since_windows(ts)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| db.max_log_id_windows().unwrap_or(0)),
+                None => db.max_log_id_windows().unwrap_or(0),
+            };
+            last.insert(*id, baseline);
         }
         mtimes.insert(*id, file_mtime(&chat_data, fname));
     }
+    // --since backfill: 시작 시 즉시 캐치업하도록 첫 폴에서 재읽기 강제(mtime 무시)
+    let force_first = since_ts.is_some();
     if cli.verbose {
         eprintln!("[sync] targets={} baselines={:?}", targets.len(), last);
     }
 
     let webhook_client = webhook.map(|_| reqwest::blocking::Client::new());
+    let mut first = true;
 
     loop {
         for (id, fname) in &targets {
             let mt = file_mtime(&chat_data, fname);
-            // 변경 없으면 스킵 (활성 방만 재읽기)
-            if mt.is_some() && mtimes.get(id).copied().flatten() == mt {
+            // 변경 없으면 스킵 (활성 방만 재읽기). --since 첫 폴은 강제 재읽기(백필).
+            let unchanged = mt.is_some() && mtimes.get(id).copied().flatten() == mt;
+            if unchanged && !(first && force_first) {
                 continue;
             }
             if cli.verbose {
-                eprintln!("[sync] {} mtime changed → 재읽기", id);
+                eprintln!("[sync] {} 재읽기", id);
             }
             mtimes.insert(*id, mt);
 
@@ -949,6 +961,7 @@ fn cmd_sync_windows(
             }
         }
 
+        first = false;
         if !follow {
             break;
         }

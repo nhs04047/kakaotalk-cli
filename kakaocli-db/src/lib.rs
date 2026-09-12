@@ -540,6 +540,20 @@ impl Database {
             .map_err(|e| DbError::QueryFailed(e.to_string()))
     }
 
+    /// Windows sync `--since`: baseline `logId` for `sendAt >= since_ts`
+    /// = `(min logId at/after since) - 1`. `None` if nothing is that recent.
+    pub fn log_id_before_since_windows(&self, since_ts: i64) -> Result<Option<i64>, DbError> {
+        let min: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MIN(logId) FROM chatLogs WHERE sendAt >= ?",
+                params![since_ts],
+                |r| r.get(0),
+            )
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(min.map(|m| m - 1))
+    }
+
     /// Windows: derive the user's own `userId` from `chatListInfo.edb`. The user
     /// is a member of every room, so the most-frequent `chatMembers.userId` is
     /// them. Used to set `is_from_me` when reading messages.
