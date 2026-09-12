@@ -37,9 +37,7 @@ impl PlatformBackend for WindowsBackend {
         crate::winsend::send_message(chat_name, text)
     }
 
-    fn dump_ax_tree(_chat: Option<&str>, _max_depth: u32) -> Result<AxNode, PlatformError> {
-        Err(PlatformError::Other(
-            "inspect is only supported on macOS".into(),
-        ))
+    fn dump_ax_tree(chat: Option<&str>, max_depth: u32) -> Result<AxNode, PlatformError> {
+        crate::winuia::dump_tree(chat, max_depth)
     }
 }
