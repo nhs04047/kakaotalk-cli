@@ -130,6 +130,19 @@ fn collect(dir: &Path, out: &mut Vec<EdbProbe>) {
 /// 실행 중 KakaoTalk.exe에서 상주 중인 DEK를 모두 수집한다.
 /// 반환: `.edb 파일명 → 32바이트 DEK`. 열려 있지 않은 채팅방의 DEK는 없을 수 있다.
 pub fn scan_deks(edb_dir: &Path) -> Result<HashMap<String, [u8; 32]>, PlatformError> {
+    let pid = find_pid(TARGET).ok_or(PlatformError::AppNotAvailable)?;
+    if let Some(cached) = load_cache(pid) {
+        if !cached.is_empty() {
+            return Ok(cached);
+        }
+    }
+    let found = scan_fresh(edb_dir, pid)?;
+    save_cache(pid, &found);
+    Ok(found)
+}
+
+/// 메모리 스캔 실수행 (캐시 우회). `scan_deks`/`scan_dek_for`가 캐시 miss 시 호출.
+fn scan_fresh(edb_dir: &Path, pid: u32) -> Result<HashMap<String, [u8; 32]>, PlatformError> {
     let oracle = Oracle::load(edb_dir);
     if oracle.files.is_empty() {
         return Err(PlatformError::Other(format!(
@@ -139,7 +152,6 @@ pub fn scan_deks(edb_dir: &Path) -> Result<HashMap<String, [u8; 32]>, PlatformEr
     }
     let total = oracle.files.len();
 
-    let pid = find_pid(TARGET).ok_or(PlatformError::AppNotAvailable)?;
     let handle = unsafe { OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, false, pid) }
         .map_err(|e| PlatformError::DekScanFailed(format!("OpenProcess: {e}")))?;
 
@@ -164,7 +176,67 @@ pub fn scan_deks(edb_dir: &Path) -> Result<HashMap<String, [u8; 32]>, PlatformEr
 
 /// 특정 `.edb` 하나의 DEK만 찾는다 (있으면).
 pub fn scan_dek_for(edb_dir: &Path, file_name: &str) -> Result<Option<[u8; 32]>, PlatformError> {
-    Ok(scan_deks(edb_dir)?.get(file_name).copied())
+    let pid = find_pid(TARGET).ok_or(PlatformError::AppNotAvailable)?;
+    if let Some(cached) = load_cache(pid) {
+        if let Some(k) = cached.get(file_name) {
+            return Ok(Some(*k)); // 캐시 히트
+        }
+    }
+    // 캐시 miss(또는 PID 불일치) → 재스캔 후 갱신.
+    let found = scan_fresh(edb_dir, pid)?;
+    save_cache(pid, &found);
+    Ok(found.get(file_name).copied())
+}
+
+// ── DEK 세션 캐시 ────────────────────────────────────────
+// 같은 KakaoTalk 로그인 세션(=같은 PID) 동안 DEK는 불변이므로, PID 기준으로
+// %TEMP%\kakaocli\dek_cache.json에 캐시해 매 명령의 메모리 스캔을 생략한다.
+// (사용자 본인 머신의 per-user 임시 폴더. KakaoTalk 재시작 시 PID가 바뀌어 무효화.)
+
+fn cache_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("kakaocli").join("dek_cache.json")
+}
+
+fn load_cache(pid: u32) -> Option<HashMap<String, [u8; 32]>> {
+    let content = std::fs::read_to_string(cache_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    if v.get("pid")?.as_u64()? as u32 != pid {
+        return None; // 다른 세션 → 무효
+    }
+    let deks = v.get("deks")?.as_object()?;
+    let mut map = HashMap::new();
+    for (name, hexv) in deks {
+        if let Some(bytes) = hexv.as_str().and_then(hex_to_32) {
+            map.insert(name.clone(), bytes);
+        }
+    }
+    Some(map)
+}
+
+fn save_cache(pid: u32, map: &HashMap<String, [u8; 32]>) {
+    let deks: serde_json::Map<String, serde_json::Value> = map
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::String(hex_encode(v))))
+        .collect();
+    let obj = serde_json::json!({ "pid": pid, "deks": deks });
+    let path = cache_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(s) = serde_json::to_string(&obj) {
+        let _ = std::fs::write(path, s);
+    }
+}
+
+fn hex_to_32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
