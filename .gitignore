@@ -6,3 +6,5 @@ winbuild.bat
 wintest.log
 winrun.ps1
 winrun.log
+synctest.log
+synctest.err

@@ -217,6 +217,7 @@ fn not_implemented_yet(feature: &str) -> ! {
     std::process::exit(1);
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn open_db(cli: &Cli) -> Result<Database, String> {
     use kakaocli_platform::PlatformBackend;
 
@@ -819,7 +820,175 @@ fn cmd_query_open_windows(cli: &Cli) -> Result<kakaocli_db::Database, String> {
 
 // ── Sync ────────────────────────────────────────────────────
 
+/// Windows sync: per-file chatLogs 폴링. 매 폴에서 전 파일을 여는 비용을 줄이려
+/// **mtime 변경 감지**로 활성 방만 재읽는다. 상주 DEK가 있는(=앱에서 연 적 있는)
+/// chatLogs만 감시. baseline은 현재 max logId(시작 시점 이후 신규만).
+#[cfg(windows)]
+fn cmd_sync_windows(
+    cli: &Cli,
+    follow: bool,
+    interval: u32,
+    chat: Option<&str>,
+    webhook: Option<&str>,
+    since: Option<&str>,
+) -> Result<(), String> {
+    use kakaocli_platform::dek;
+    use std::time::SystemTime;
+
+    let _ = since; // Windows sync v1: --since 미지원(현재 max부터 신규만)
+
+    let user_dir = kakaocli_core::db_path::windows_user_dir()
+        .ok_or_else(|| "KakaoTalk 사용자 디렉터리를 찾지 못했습니다.".to_string())?;
+    let chat_data = user_dir.join("chat_data");
+    let deks = dek::scan_deks(&user_dir).map_err(|e| format!("DEK 스캔 실패: {}", e))?;
+
+    let room_db = dek::open_edb_from(&deks, &chat_data.join("chatListInfo.edb"), 0)
+        .map_err(|e| format!("채팅방 목록을 열 수 없습니다: {}", e))?;
+    let chats = room_db
+        .list_chats_windows(9999)
+        .map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
+    let own_uid = room_db.windows_own_user_id().ok().flatten().unwrap_or(0);
+    let chat_name_map: HashMap<i64, String> =
+        chats.iter().map(|c| (c.id, c.display_name.clone())).collect();
+
+    let mut names = dek::open_edb_from(&deks, &user_dir.join("TalkUserDB.edb"), 0)
+        .ok()
+        .and_then(|db| db.talk_user_names().ok())
+        .unwrap_or_default();
+    if own_uid != 0 {
+        names.entry(own_uid).or_insert_with(|| "나".to_string());
+    }
+
+    let filter_id: Option<i64> = match chat {
+        Some(name) => Some(
+            chats
+                .iter()
+                .find(|c| c.display_name.contains(name))
+                .ok_or_else(|| format!("'{}' 채팅방을 찾지 못했습니다.", name))?
+                .id,
+        ),
+        None => None,
+    };
+    let single = filter_id.is_some();
+
+    // 감시 대상: 상주 DEK가 있는 chatLogs_<id>.edb (필터 적용)
+    let mut targets: Vec<(i64, String)> = deks
+        .keys()
+        .filter_map(|f| {
+            f.strip_prefix("chatLogs_")
+                .and_then(|r| r.trim_end_matches(".edb").parse::<i64>().ok())
+                .map(|id| (id, f.clone()))
+        })
+        .collect();
+    if let Some(fid) = filter_id {
+        targets.retain(|(id, _)| *id == fid);
+    }
+    if targets.is_empty() {
+        return Err("감시할 채팅방이 없습니다 (해당 방을 KakaoTalk에서 열어 DEK를 상주시키세요).".to_string());
+    }
+
+    // baseline: 현재 max logId + mtime
+    let mut last: HashMap<i64, i64> = HashMap::new();
+    let mut mtimes: HashMap<i64, Option<SystemTime>> = HashMap::new();
+    for (id, fname) in &targets {
+        if let Ok(db) = dek::open_edb_from(&deks, &chat_data.join(fname), own_uid) {
+            last.insert(*id, db.max_log_id_windows().unwrap_or(0));
+        }
+        mtimes.insert(*id, file_mtime(&chat_data, fname));
+    }
+    if cli.verbose {
+        eprintln!("[sync] targets={} baselines={:?}", targets.len(), last);
+    }
+
+    let webhook_client = webhook.map(|_| reqwest::blocking::Client::new());
+
+    loop {
+        for (id, fname) in &targets {
+            let mt = file_mtime(&chat_data, fname);
+            // 변경 없으면 스킵 (활성 방만 재읽기)
+            if mt.is_some() && mtimes.get(id).copied().flatten() == mt {
+                continue;
+            }
+            if cli.verbose {
+                eprintln!("[sync] {} mtime changed → 재읽기", id);
+            }
+            mtimes.insert(*id, mt);
+
+            let db = match dek::open_edb_from(&deks, &chat_data.join(fname), own_uid) {
+                Ok(d) => d,
+                Err(e) => {
+                    if cli.verbose {
+                        eprintln!("[sync] {} open 실패: {}", id, e);
+                    }
+                    continue;
+                }
+            };
+            let after = *last.get(id).unwrap_or(&0);
+            let mut msgs = match db.messages_after_windows(*id, after, 500) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if cli.verbose {
+                eprintln!("[sync] {} after={} → {}건", id, after, msgs.len());
+            }
+            if msgs.is_empty() {
+                continue;
+            }
+            for m in &mut msgs {
+                m.sender_name = names.get(&m.sender_id).cloned();
+            }
+            last.insert(*id, msgs.last().map(|m| m.id).unwrap_or(after));
+
+            for m in &msgs {
+                emit_sync_message(cli, m, &chat_name_map, single);
+            }
+            if let (Some(client), Some(url)) = (webhook_client.as_ref(), webhook) {
+                let payload: Vec<serde_json::Value> =
+                    msgs.iter().map(|m| sync_message_json(m, &chat_name_map)).collect();
+                post_webhook(client, url, &payload);
+            }
+        }
+
+        if !follow {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(interval.max(1) as u64));
+    }
+    Ok(())
+}
+
+/// `.edb` + `-wal`의 최신 mtime (새 메시지는 WAL에 먼저 반영됨).
+#[cfg(windows)]
+fn file_mtime(dir: &std::path::Path, fname: &str) -> Option<std::time::SystemTime> {
+    let edb = std::fs::metadata(dir.join(fname))
+        .and_then(|m| m.modified())
+        .ok();
+    let wal = std::fs::metadata(dir.join(format!("{}-wal", fname)))
+        .and_then(|m| m.modified())
+        .ok();
+    [edb, wal].into_iter().flatten().max()
+}
+
 fn cmd_sync(
+    cli: &Cli,
+    follow: bool,
+    interval: u32,
+    chat: Option<&str>,
+    webhook: Option<&str>,
+    since: Option<&str>,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        return cmd_sync_windows(cli, follow, interval, chat, webhook, since);
+    }
+    #[cfg(not(windows))]
+    {
+        cmd_sync_unix(cli, follow, interval, chat, webhook, since)
+    }
+}
+
+#[cfg(not(windows))]
+fn cmd_sync_unix(
     cli: &Cli,
     follow: bool,
     interval: u32,

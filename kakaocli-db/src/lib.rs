@@ -495,6 +495,51 @@ impl Database {
         Ok(rows)
     }
 
+    /// Windows sync: `chatLogs` messages with `logId > after_log_id`, oldest first.
+    pub fn messages_after_windows(
+        &self,
+        chat_id: i64,
+        after_log_id: i64,
+        limit: u32,
+    ) -> Result<Vec<Message>, DbError> {
+        let sql = "\
+            SELECT logId, authorId, message, type, sendAt \
+            FROM chatLogs \
+            WHERE (deleted IS NULL OR deleted = 0) AND logId > ? \
+            ORDER BY logId ASC \
+            LIMIT ?";
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let my_uid = self.my_user_id;
+        let rows = stmt
+            .query_map(params![after_log_id, limit], |row| {
+                let author_id: i64 = row.get::<_, Option<i64>>(1)?.unwrap_or(0);
+                Ok(Message {
+                    id: row.get(0)?,
+                    chat_id,
+                    sender_id: author_id,
+                    sender_name: None,
+                    text: row.get(2)?,
+                    message_type: MessageType::from(row.get::<_, Option<i32>>(3)?.unwrap_or(0)),
+                    created_at: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    is_from_me: author_id == my_uid,
+                })
+            })
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(rows)
+    }
+
+    /// Windows sync: current max `logId` in a `chatLogs` file (baseline). 0 if empty.
+    pub fn max_log_id_windows(&self) -> Result<i64, DbError> {
+        self.conn
+            .query_row("SELECT COALESCE(MAX(logId), 0) FROM chatLogs", [], |r| r.get(0))
+            .map_err(|e| DbError::QueryFailed(e.to_string()))
+    }
+
     /// Windows: derive the user's own `userId` from `chatListInfo.edb`. The user
     /// is a member of every room, so the most-frequent `chatMembers.userId` is
     /// them. Used to set `is_from_me` when reading messages.
