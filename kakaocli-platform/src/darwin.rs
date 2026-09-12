@@ -91,7 +91,7 @@ impl PlatformBackend for DarwinBackend {
             })?;
 
         // Cache the userId so future runs don't need --user-id
-        let _ = db_path::write_cached_user_id(user_id);
+        db_path::write_cached_user_id(user_id);
 
         Ok(DbKey { key_hex, db_path })
     }
@@ -103,7 +103,7 @@ impl PlatformBackend for DarwinBackend {
         // `check` always terminates.
         let probe = kakaocli_core::util::with_timeout(std::time::Duration::from_secs(3), || {
             let fda = db_path::check_full_disk_access();
-            let db_exists = fda && db_path::mac_db_files().first().is_some();
+            let db_exists = fda && !db_path::mac_db_files().is_empty();
             (fda, db_exists)
         });
 
@@ -699,7 +699,7 @@ fn ax_build_tree(element: &accessibility::AXUIElement, max_depth: u32) -> AxNode
         .attribute(&AXAttribute::new(&CFString::new("AXSelected")))
         .ok()
         .and_then(|v| v.downcast::<CFBoolean>())
-        .map(|v| bool::from(v))
+        .map(bool::from)
         .unwrap_or(false);
 
     let mut node = AxNode {
