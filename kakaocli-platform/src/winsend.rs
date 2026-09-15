@@ -21,9 +21,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY, VK_CONTROL, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumChildWindows, EnumWindows, GetDlgCtrlID, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, SetCursorPos,
-    SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    BringWindowToTop, EnumChildWindows, EnumWindows, GetDlgCtrlID, GetForegroundWindow,
+    GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, SetCursorPos, SetForegroundWindow, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
+    SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, SW_SHOW,
 };
 
 use crate::PlatformError;
@@ -106,20 +107,74 @@ fn deliver_matched(
     let edit = find_richedit(hwnd)
         .ok_or_else(|| PlatformError::UiError("입력창(RichEdit)을 찾지 못했습니다".into()))?;
 
+    // KakaoTalk은 저수준 입력만 "전송"으로 인정한다(WM_SETTEXT/WM_CHAR로는 전송버튼이
+    // 안 켜짐). 전송에는 실제 키 입력(SendInput)이 필요하고 이는 포그라운드 창에만
+    // 들어간다. 화면에 안 보이게 하려고 채팅창을 잠깐 화면 밖으로 옮겨 포그라운드로
+    // 만든 뒤 입력하고, 원래 포그라운드 창을 복원하고 채팅창을 제자리로 되돌린다.
+    let prev = unsafe { GetForegroundWindow() };
+    let orig = window_rect(hwnd);
+    let was_min = unsafe { IsIconic(hwnd) }.as_bool();
     unsafe {
-        let _ = ShowWindow(hwnd, SW_RESTORE);
-        let _ = SetForegroundWindow(hwnd);
-        sleep(Duration::from_millis(250));
-        let _ = SetFocus(Some(edit));
-        sleep(Duration::from_millis(120));
+        // 화면 밖으로 이동(비활성). 최소화 상태면 화면 밖에서 복원해 입력 가능하게.
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            -32000,
+            -32000,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
+    foreground_offscreen(hwnd);
+    unsafe {
+        let _ = SetFocus(Some(edit));
+    }
+    sleep(Duration::from_millis(150));
 
     let sanitized = text.replace(['\r', '\n'], " ");
     type_unicode(&sanitized);
     sleep(Duration::from_millis(120));
     press_enter();
+    sleep(Duration::from_millis(200));
+
+    // 원래 포그라운드 창(예: 터미널) 복원 후, 채팅창을 원위치로(비활성). 원래
+    // 최소화 상태였으면 다시 최소화.
+    if (prev.0 as usize) != 0 && prev != hwnd {
+        foreground_offscreen(prev);
+    }
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            orig.left,
+            orig.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        if was_min {
+            let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_MINIMIZE);
+        }
+    }
+    dbg_send(|| format!("전송 완료(화면 밖 입력): edit=0x{:X}", edit.0 as usize));
 
     Ok(())
+}
+
+/// 창을 위치 변경 없이(SW_RESTORE로 원위치 튀는 것 방지) 포그라운드로 만든다.
+/// 화면 밖으로 옮긴 채팅창에 SendInput을 넣기 위한 용도.
+fn foreground_offscreen(hwnd: HWND) {
+    unsafe {
+        let mut tpid = 0u32;
+        let target = GetWindowThreadProcessId(hwnd, Some(&mut tpid));
+        let me = GetCurrentThreadId();
+        let _ = AttachThreadInput(me, target, true);
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+        let _ = AttachThreadInput(me, target, false);
+    }
 }
 
 /// KakaoTalk pid의 채팅창(EVA_Window_Dblclk, 제목 있는 것, 메인창 제외)을 수집.
