@@ -4,9 +4,13 @@
 //! 입력창은 표준 `RICHEDIT50W`(dlg id 1006)다. 열린 채팅창을 제목으로 찾아 검증한
 //! 뒤 입력창에 포커스를 주고 유니코드 키 입력 + Enter로 전송한다.
 //!
-//! 안전: 전송 전 창 제목을 재확인(다른 방 오발송 방지). 채팅창이 열려 있지 않으면
-//! 메인 창 검색창(dlg id 100)에 방 이름을 입력해 자동으로 연 뒤(open_chat),
-//! 제목 재검증을 거쳐 전송한다.
+//! 전송은 화면에 창을 띄우지 않는다: 대상 채팅창을 잠깐 화면 밖으로 옮겨 포그라운드로
+//! 만들어 SendInput으로 입력·전송한 뒤 원위치로 되돌린다(KakaoTalk은 저수준 입력만
+//! 전송으로 인정해 WM_SETTEXT 등 백그라운드 메시지로는 전송이 안 됨).
+//!
+//! 안전: 전송 직전 창 제목을 재확인(다른 방 오발송 방지). 일반 채팅은 "열린 창"에만
+//! 전송한다(통합검색 자동 열기는 결과 행이 자동화 API에 노출되지 않아 "친구 추가"
+//! 오작동 위험 → 미지원). 자기채팅은 친구 탭 최상단 프로필 더블클릭으로 연다.
 
 use std::mem::size_of;
 use std::thread::sleep;
@@ -18,7 +22,7 @@ use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY, VK_CONTROL, VK_RETURN,
+    MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumChildWindows, EnumWindows, GetDlgCtrlID, GetForegroundWindow,
@@ -30,21 +34,25 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::PlatformError;
 
 const RICHEDIT_INPUT_ID: i32 = 1006;
-/// 메인 창(제목=카카오톡)의 검색 입력창(표준 Edit) dlg id.
-const SEARCH_EDIT_ID: i32 = 100;
-const VK_A: u16 = 0x41;
 
-/// 일반 채팅(친구/그룹) 전송. 열린 창이 없으면 메인 창 검색으로 자동 열기.
+/// 일반 채팅(친구/그룹) 전송. 열린 창에만 전송한다(화면 없이 조용히).
+///
+/// 안 열린 방을 검색으로 자동 열기는 KakaoTalk 통합검색이 결과 최상단에 "친구 추가"
+/// 제안을 넣고, 결과 행이 어떤 자동화 API(Win32 자식창/UIAutomation)에도 노출되지 않아
+/// 정확히 "채팅방" 결과만 클릭할 수 없다(친구 추가 오작동). 그래서 자동 열기는 하지
+/// 않고, 사용자가 방을 열면 무팝업으로 전송한다. (자기채팅은 send_self_message에서
+/// 친구 탭 최상단 더블클릭이라는 안정적 경로로 연다.)
 pub fn send_message(chat_name: &str, text: &str) -> Result<(), PlatformError> {
     let pid = crate::dek::find_kakao_pid().ok_or(PlatformError::AppNotAvailable)?;
 
-    let mut windows = enum_chat_windows(pid);
+    let windows = enum_chat_windows(pid);
     dbg_send(|| format!("초기 열린 채팅창: {:?}", titles(&windows)));
     if !windows.iter().any(|(_, t)| title_matches(t, chat_name)) {
-        dbg_send(|| format!("'{}' 매칭 창 없음 → 검색 자동 열기 시도", chat_name));
-        open_chat(pid, chat_name)?;
-        windows = enum_chat_windows(pid);
-        dbg_send(|| format!("자동 열기 후 채팅창: {:?}", titles(&windows)));
+        return Err(PlatformError::Other(format!(
+            "'{}' 채팅창이 열려 있지 않습니다 — KakaoTalk에서 해당 채팅방을 먼저 연 뒤 다시 시도하세요. \
+             (열려 있으면 화면 없이 조용히 전송됩니다.)",
+            chat_name
+        )));
     }
     deliver_matched(&windows, chat_name, text)
 }
@@ -265,53 +273,6 @@ fn find_main_window(pid: u32) -> Option<HWND> {
     ctx.found
 }
 
-/// 메인 창의 검색창(dlg id 100)에 방 이름을 입력하고 Enter로 상단 결과를 연다.
-/// 자동 열기 후에도 send_message는 제목을 재검증하므로 오발송은 차단된다.
-fn open_chat(pid: u32, chat_name: &str) -> Result<(), PlatformError> {
-    let main = find_main_window(pid).ok_or_else(|| {
-        PlatformError::Other("KakaoTalk 메인 창을 찾지 못했습니다 (로그인 상태인지 확인).".into())
-    })?;
-    dbg_send(|| format!("메인 창 발견: hwnd=0x{:X}", main.0 as usize));
-    // 트레이/최소화 상태여도 창을 앞으로 복원 (AttachThreadInput로 포그라운드 락 우회).
-    restore_foreground(main);
-    sleep(Duration::from_millis(500));
-
-    let search = find_child_by_id(main, SEARCH_EDIT_ID).ok_or_else(|| {
-        PlatformError::UiError("메인 창 검색 입력창(Edit)을 찾지 못했습니다".into())
-    })?;
-    let r = window_rect(search);
-    let (w, h) = (r.right - r.left, r.bottom - r.top);
-    dbg_send(|| {
-        format!(
-            "검색 Edit hwnd=0x{:X} rect=({},{},{},{}) {}x{}",
-            search.0 as usize, r.left, r.top, r.right, r.bottom, w, h
-        )
-    });
-    // 검색창이 접혀 있으면(0 크기) 클릭 대상이 없다 — 안내 후 중단(오발송/오입력 방지).
-    if w <= 0 || h <= 0 {
-        return Err(PlatformError::Other(
-            "메인 창 검색 입력창이 접혀 있습니다 — KakaoTalk 메인 창에서 검색(돋보기)이 보이는 상태로 두고 다시 시도하세요."
-                .into(),
-        ));
-    }
-
-    // 커스텀 EVA edit은 SetFocus가 잘 안 먹으므로 실제 클릭으로 포커스.
-    click_center(search);
-    sleep(Duration::from_millis(200));
-
-    // 기존 검색어 제거 후 방 이름 입력.
-    press_ctrl_a();
-    sleep(Duration::from_millis(60));
-    type_unicode(chat_name);
-    dbg_send(|| format!("검색어 입력 완료: '{}'", chat_name));
-    // 검색 결과가 채워질 시간을 준 뒤 Enter로 상단 결과 열기.
-    sleep(Duration::from_millis(800));
-    press_enter();
-    dbg_send(|| "Enter 입력(상단 결과 열기)".to_string());
-    sleep(Duration::from_millis(1000));
-    Ok(())
-}
-
 /// 트레이/숨김 상태의 창을 화면 앞으로 복원한다. AttachThreadInput으로 포그라운드
 /// 락을 우회해 SetForegroundWindow가 실제로 먹도록 한다.
 fn restore_foreground(hwnd: HWND) {
@@ -382,12 +343,6 @@ fn double_click_point(x: i32, y: i32) {
             size_of::<INPUT>() as i32,
         );
     }
-}
-
-/// 컨트롤 중앙을 실제 좌클릭해 포커스를 준다.
-fn click_center(hwnd: HWND) {
-    let r = window_rect(hwnd);
-    click_point((r.left + r.right) / 2, (r.top + r.bottom) / 2);
 }
 
 /// 자기채팅(나와의 채팅)을 연다: 친구 탭 최상단 프로필 행을 더블클릭.
@@ -516,39 +471,6 @@ fn key_unicode(scan: u16, up: bool) -> INPUT {
                 dwExtraInfo: 0,
             },
         },
-    }
-}
-
-fn key_vk(vk: VIRTUAL_KEY, up: bool) -> INPUT {
-    let flags = if up {
-        KEYEVENTF_KEYUP
-    } else {
-        KEYBD_EVENT_FLAGS(0)
-    };
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                wScan: 0,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    }
-}
-
-/// Ctrl+A (전체 선택) — 검색창의 기존 텍스트 제거용.
-fn press_ctrl_a() {
-    let seq = [
-        key_vk(VK_CONTROL, false),
-        key_vk(VIRTUAL_KEY(VK_A), false),
-        key_vk(VIRTUAL_KEY(VK_A), true),
-        key_vk(VK_CONTROL, true),
-    ];
-    unsafe {
-        SendInput(&seq, size_of::<INPUT>() as i32);
     }
 }
 

@@ -151,13 +151,17 @@ mod win {
             .map(|b| b.to_string())
             .unwrap_or_default();
         let indent = "  ".repeat(depth as usize);
-        // 이름/자동화ID가 있거나 컨테이너류만 노출 (노이즈 감소)
+        let r = el.CurrentBoundingRectangle().unwrap_or_default();
         println!(
-            "{}[{}] name='{}' id='{}'",
+            "{}[{}] name='{}' id='{}' rect=({},{},{},{})",
             indent,
             control_type_name(ct),
             truncate(&name, 40),
-            aid
+            aid,
+            r.left,
+            r.top,
+            r.right,
+            r.bottom
         );
 
         if depth >= max {
