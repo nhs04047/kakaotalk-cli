@@ -16,6 +16,13 @@ pub use windows::WindowsBackend as Platform;
 pub mod dek;
 #[cfg(target_os = "windows")]
 pub(crate) mod winsend;
+
+/// 자기채팅(나와의 채팅) 전송 (Windows 전용 경로 — 자기채팅은 이름 검색에 안 뜨므로
+/// 친구 탭 최상단 프로필 더블클릭으로 연다). `--me` 전송에 사용.
+#[cfg(target_os = "windows")]
+pub fn send_self_message(self_title: &str, text: &str) -> Result<(), PlatformError> {
+    winsend::send_self_message(self_title, text)
+}
 #[cfg(target_os = "windows")]
 pub(crate) mod winuia;
 

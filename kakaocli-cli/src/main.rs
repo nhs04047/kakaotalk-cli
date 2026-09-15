@@ -1400,6 +1400,19 @@ fn cmd_send(
 
     use kakaocli_platform::PlatformBackend;
 
+    // Windows에서 --me(자기채팅)는 이름 검색에 안 뜨므로 전용 경로(친구 탭
+    // 최상단 더블클릭)로 연다. 그 외에는 공용 send_message(검색 자동 열기).
+    #[cfg(windows)]
+    {
+        if me {
+            kakaocli_platform::send_self_message(&target_name, &text)
+                .map_err(|e| format!("전송 실패: {}", e))?;
+        } else {
+            kakaocli_platform::Platform::send_message(&target_name, &text)
+                .map_err(|e| format!("전송 실패: {}", e))?;
+        }
+    }
+    #[cfg(not(windows))]
     kakaocli_platform::Platform::send_message(&target_name, &text)
         .map_err(|e| format!("전송 실패: {}", e))?;
 
