@@ -376,7 +376,8 @@ fn get_main_window(app: &accessibility::AXUIElement) -> Option<accessibility::AX
     for window in windows.iter() {
         if let Ok(id_val) = window.attribute(&ident_attr) {
             if let Some(id_cfstr) = id_val.downcast::<CFString>() {
-                if id_cfstr.to_string() == "Main Window" {
+                let id_str: String = id_cfstr.to_string();
+                if id_str == "Main Window" {
                     return Some(window.clone());
                 }
             }
@@ -386,7 +387,8 @@ fn get_main_window(app: &accessibility::AXUIElement) -> Option<accessibility::AX
     // 2패스(폴백): "Main Window" 식별자를 못 찾았을 때만 첫 AXWindow를 쓴다.
     for window in windows.iter() {
         if let Ok(role) = window.attribute(&AXAttribute::role()) {
-            if role.to_string() == "AXWindow" {
+            let role_str: String = role.to_string();
+            if role_str == "AXWindow" {
                 return Some(window.clone());
             }
         }
