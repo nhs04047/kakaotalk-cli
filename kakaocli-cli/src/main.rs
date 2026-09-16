@@ -1346,6 +1346,15 @@ fn cmd_send(
     dry_run: bool,
     yes: bool,
 ) -> Result<(), String> {
+    // --me는 대상이 자기채팅으로 고정이라 positional [CHAT]을 받지 않는다. 사용자가
+    // `send --me "메시지"`처럼 치면 clap은 "메시지"를 CHAT으로 파싱하므로, --me이고
+    // MESSAGE가 비었으면 CHAT 자리를 MESSAGE로 해석한다.
+    let (chat_name, text) = if me && text.is_none() {
+        (None, chat_name)
+    } else {
+        (chat_name, text)
+    };
+
     // Resolve target chat (interactive pick when omitted and not sending to self)
     #[cfg(windows)]
     let target_name = windows_resolve_send_target(cli, chat_name, me)?;

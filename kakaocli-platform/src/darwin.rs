@@ -171,15 +171,53 @@ impl PlatformBackend for DarwinBackend {
         select_ax_row_via_keyboard(&chat_list)?;
 
         std::thread::sleep(std::time::Duration::from_millis(800));
-        verify_chat_window(chat_name)?;
+        let chat_window = verify_chat_window(chat_name)?;
 
         let sanitized = text.replace('\n', " ");
 
+        // 입력창(AXTextArea/AXTextField)을 찾아 전송 전후 값을 검증한다. 못 찾으면
+        // 도착을 확인할 수 없으므로 거짓 성공 대신 에러로 보고한다.
+        let input =
+            find_child_by_role(&chat_window, &["AXTextArea", "AXTextField"]).ok_or_else(|| {
+                PlatformError::UiError(
+                    "채팅 입력창(AXTextArea)을 찾지 못해 전송을 확인할 수 없습니다".into(),
+                )
+            })?;
+
         type_text(&sanitized)?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        // 입력 전 검증: 우리가 친 텍스트가 입력창에 실제로 들어갔는지(엉뚱한 창 방지).
+        if let Some(v) = read_ax_value(&input) {
+            if !v.contains(sanitized.as_str()) {
+                return Err(PlatformError::Other(
+                    "입력한 내용이 채팅 입력창에 반영되지 않았습니다 — 전송을 중단합니다.".into(),
+                ));
+            }
+        }
+
         press_enter()?;
 
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // 전송 후 도착 확인: 입력창이 비워지면(또는 우리 텍스트가 사라지면) 전송된 것.
+        let mut confirmed = false;
+        for _ in 0..15 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            match read_ax_value(&input) {
+                Some(v) if v.trim().is_empty() || !v.contains(sanitized.as_str()) => {
+                    confirmed = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if !confirmed {
+            return Err(PlatformError::Other(
+                "전송을 확인하지 못했습니다 (입력창이 비워지지 않음). 실제 전송 여부를 확인하세요."
+                    .into(),
+            ));
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
         press_cmd_w().ok();
 
         Ok(())
@@ -332,28 +370,23 @@ fn get_main_window(app: &accessibility::AXUIElement) -> Option<accessibility::AX
     // AXAttribute::windows() returns CFArray<AXUIElement> → can iterate directly
     let windows = app.attribute(&AXAttribute::windows()).ok()?;
 
+    // 1패스: 전체 창을 순회하며 AXIdentifier == "Main Window"인 진짜 메인 창을 찾는다.
+    // (창이 여러 개일 때 첫 창이 열린 대화창일 수 있으므로 fallback을 루프 안에 두면 안 됨.)
+    let ident_attr = AXAttribute::new(&CFString::new("AXIdentifier"));
     for window in windows.iter() {
-        // AXAttribute::role() returns CFString → .to_string()
-        if let Ok(role) = window.attribute(&AXAttribute::role()) {
-            let role_str: String = role.to_string();
-            if role_str == "AXApplication" {
-                continue;
-            }
-        }
-        // Custom attribute: AXIdentifier (returns CFType → must downcast)
-        let ident_attr = AXAttribute::new(&CFString::new("AXIdentifier"));
         if let Ok(id_val) = window.attribute(&ident_attr) {
             if let Some(id_cfstr) = id_val.downcast::<CFString>() {
-                let id_str: String = id_cfstr.to_string();
-                if id_str == "Main Window" {
+                if id_cfstr.to_string() == "Main Window" {
                     return Some(window.clone());
                 }
             }
         }
-        // Fallback: first AXWindow
+    }
+
+    // 2패스(폴백): "Main Window" 식별자를 못 찾았을 때만 첫 AXWindow를 쓴다.
+    for window in windows.iter() {
         if let Ok(role) = window.attribute(&AXAttribute::role()) {
-            let role_str: String = role.to_string();
-            if role_str == "AXWindow" {
+            if role.to_string() == "AXWindow" {
                 return Some(window.clone());
             }
         }
@@ -550,7 +583,8 @@ fn select_ax_row_via_keyboard(chat_list: &accessibility::AXUIElement) -> Result<
 
 // ── Window verification ──────────────────────────────────────
 
-fn verify_chat_window(expected_name: &str) -> Result<(), PlatformError> {
+/// 열린 채팅창을 검증하고 그 창 AX 요소를 반환한다(전송 후 도착 확인에 재사용).
+fn verify_chat_window(expected_name: &str) -> Result<accessibility::AXUIElement, PlatformError> {
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let app = get_kakaotalk_ax_app()
@@ -573,10 +607,10 @@ fn verify_chat_window(expected_name: &str) -> Result<(), PlatformError> {
             // already guaranteed the correct row, so any real chat window opening
             // is sufficient confirmation here.
             if self_chat {
-                return Ok(());
+                return Ok(w.clone());
             }
             if title_str.contains(expected_name) || expected_name.contains(&title_str) {
-                return Ok(());
+                return Ok(w.clone());
             }
             return Err(PlatformError::ChatVerificationFailed {
                 expected: expected_name.to_string(),
@@ -589,6 +623,14 @@ fn verify_chat_window(expected_name: &str) -> Result<(), PlatformError> {
         "'{}' 채팅창이 열리지 않았습니다",
         expected_name
     )))
+}
+
+/// AX 요소의 AXValue(문자열)를 읽는다. 텍스트 입력창의 현재 내용 확인에 사용.
+fn read_ax_value(el: &accessibility::AXUIElement) -> Option<String> {
+    let v = el
+        .attribute(&AXAttribute::new(&CFString::new("AXValue")))
+        .ok()?;
+    Some(v.downcast::<CFString>()?.to_string())
 }
 
 // ── Keyboard input via CGEvent ──────────────────────────────

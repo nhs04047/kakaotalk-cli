@@ -15,6 +15,40 @@ use rusqlite::{params, Connection, OpenFlags};
 use serde_json::Value;
 use thiserror::Error;
 
+// ── Row helpers ─────────────────────────────────────────────
+
+/// KakaoTalk의 시각 컬럼(sentAt/lastUpdatedAt 등)은 SQLite 동적 타입 때문에 같은
+/// 컬럼에 INTEGER와 REAL이 섞여 저장돼 있다. `row.get::<i64>`는 REAL 값에서
+/// `Invalid column type Real`로 터지므로, 타입에 무관하게 i64로 읽는다.
+fn num_i64(row: &rusqlite::Row, idx: usize) -> rusqlite::Result<i64> {
+    use rusqlite::types::ValueRef;
+    match row.get_ref(idx)? {
+        ValueRef::Integer(i) => Ok(i),
+        ValueRef::Real(f) => Ok(f as i64),
+        ValueRef::Null => Ok(0),
+        other => Err(rusqlite::Error::InvalidColumnType(
+            idx,
+            "numeric".into(),
+            other.data_type(),
+        )),
+    }
+}
+
+/// `num_i64`의 nullable 버전. NULL이면 `None`.
+fn num_opt_i64(row: &rusqlite::Row, idx: usize) -> rusqlite::Result<Option<i64>> {
+    use rusqlite::types::ValueRef;
+    match row.get_ref(idx)? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Integer(i) => Ok(Some(i)),
+        ValueRef::Real(f) => Ok(Some(f as i64)),
+        other => Err(rusqlite::Error::InvalidColumnType(
+            idx,
+            "numeric".into(),
+            other.data_type(),
+        )),
+    }
+}
+
 // ── Error type ──────────────────────────────────────────────
 
 #[derive(Error, Debug)]
@@ -203,7 +237,7 @@ impl Database {
                         .unwrap_or_else(|| "(unknown)".into()),
                     member_count: row.get(3)?,
                     last_message_id: row.get::<_, Option<i64>>(4)?,
-                    last_message_at: row.get::<_, Option<i64>>(5)?,
+                    last_message_at: num_opt_i64(row, 5)?,
                     unread_count: row.get(6)?,
                 })
             })
@@ -250,7 +284,7 @@ impl Database {
                     sender_name: row.get(3)?,
                     text: row.get(4)?,
                     message_type: MessageType::from(row.get::<_, i32>(5)?),
-                    created_at: row.get(6)?,
+                    created_at: num_i64(row, 6)?,
                     is_from_me: row.get::<_, i64>(2)? == my_uid,
                 })
             })
@@ -300,7 +334,7 @@ impl Database {
                     sender_name: row.get(3)?,
                     text: row.get(4)?,
                     message_type: MessageType::from(row.get::<_, i32>(5)?),
-                    created_at: row.get(6)?,
+                    created_at: num_i64(row, 6)?,
                     is_from_me: row.get::<_, i64>(2)? == my_uid,
                 })
             })
@@ -371,7 +405,7 @@ impl Database {
                     display_name,
                     member_count: row.get::<_, Option<i32>>(3)?.unwrap_or(0),
                     last_message_id: row.get::<_, Option<i64>>(5)?,
-                    last_message_at: row.get::<_, Option<i64>>(6)?,
+                    last_message_at: num_opt_i64(row, 6)?,
                     unread_count: row.get::<_, Option<i32>>(4)?.unwrap_or(0),
                 })
             })
@@ -415,7 +449,7 @@ impl Database {
                     sender_name: None,
                     text: row.get(2)?,
                     message_type: MessageType::from(row.get::<_, Option<i32>>(3)?.unwrap_or(0)),
-                    created_at: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    created_at: num_i64(row, 4)?,
                     is_from_me: author_id == my_uid,
                 })
             })
@@ -487,7 +521,7 @@ impl Database {
                     sender_name: None,
                     text: row.get(2)?,
                     message_type: MessageType::from(row.get::<_, Option<i32>>(3)?.unwrap_or(0)),
-                    created_at: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    created_at: num_i64(row, 4)?,
                     is_from_me: author_id == my_uid,
                 })
             })
@@ -526,7 +560,7 @@ impl Database {
                     sender_name: None,
                     text: row.get(2)?,
                     message_type: MessageType::from(row.get::<_, Option<i32>>(3)?.unwrap_or(0)),
-                    created_at: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                    created_at: num_i64(row, 4)?,
                     is_from_me: author_id == my_uid,
                 })
             })
@@ -601,7 +635,7 @@ impl Database {
                     sender_name: row.get(3)?,
                     text: row.get(4)?,
                     message_type: MessageType::from(row.get::<_, i32>(5)?),
-                    created_at: row.get(6)?,
+                    created_at: num_i64(row, 6)?,
                     is_from_me: row.get::<_, i64>(2)? == my_uid,
                 })
             })
@@ -650,7 +684,7 @@ impl Database {
                     },
                     member_count: row.get(3)?,
                     last_message_id: row.get::<_, Option<i64>>(4)?,
-                    last_message_at: row.get::<_, Option<i64>>(5)?,
+                    last_message_at: num_opt_i64(row, 5)?,
                     unread_count: row.get(6)?,
                 })
             })
@@ -779,6 +813,31 @@ impl Database {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    // KakaoTalk의 시각 컬럼은 INTEGER/REAL 혼합 저장 → num_i64/num_opt_i64가 둘 다
+    // 읽어야 한다. 평문 in-memory rusqlite로 회귀 검증(SQLCipher 불필요).
+    #[test]
+    fn test_num_i64_handles_integer_and_real() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (id INTEGER, ts);
+             INSERT INTO t VALUES (1, 1634520400);
+             INSERT INTO t VALUES (2, 1634520452.438);
+             INSERT INTO t VALUES (3, NULL);",
+        )
+        .unwrap();
+
+        let mut stmt = conn.prepare("SELECT ts FROM t ORDER BY id").unwrap();
+        let vals: Vec<(i64, Option<i64>)> = stmt
+            .query_map([], |row| Ok((num_i64(row, 0)?, num_opt_i64(row, 0)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert_eq!(vals[0], (1634520400, Some(1634520400))); // INTEGER
+        assert_eq!(vals[1], (1634520452, Some(1634520452))); // REAL → 절삭
+        assert_eq!(vals[2], (0, None)); // NULL
+    }
 
     #[test]
     fn test_open_nonexistent_db() {
