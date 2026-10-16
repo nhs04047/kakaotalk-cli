@@ -199,6 +199,9 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             } else if let Some(c) = s("chat") {
                 a.push("--chat".into());
                 a.push(c);
+            } else {
+                // chat/me가 없으면 CLI가 대화형 방 선택으로 빠져 헤드리스에서 멈춘다.
+                return Err("chat 또는 me 중 하나가 필요합니다".into());
             }
             if let Some(since) = s("since") {
                 a.push("--since".into());
@@ -281,22 +284,30 @@ fn kakaocli_path() -> std::path::PathBuf {
     std::path::PathBuf::from("kakaocli")
 }
 
+/// Run kakaocli. `Ok` on zero exit (success), `Err` on non-zero so the caller
+/// marks the tool result `isError: true` instead of reporting failure as success.
 fn run_kakaocli(argv: &[String]) -> Result<String, String> {
     let output = std::process::Command::new(kakaocli_path())
         .args(argv)
         .output()
         .map_err(|e| e.to_string())?;
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        if !err.trim().is_empty() {
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(&err);
-        }
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    if output.status.success() {
+        return Ok(stdout);
     }
-    Ok(text)
+    // Non-zero exit → surface stdout+stderr as an error.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut msg = stdout;
+    if !stderr.trim().is_empty() {
+        if !msg.is_empty() {
+            msg.push('\n');
+        }
+        msg.push_str(&stderr);
+    }
+    if msg.trim().is_empty() {
+        msg = format!("kakaocli 비정상 종료: {}", output.status);
+    }
+    Err(msg)
 }
 
 #[cfg(test)]
@@ -340,5 +351,13 @@ mod tests {
     #[test]
     fn find_requires_keyword() {
         assert!(build_argv("find", &json!({})).is_err());
+    }
+
+    #[test]
+    fn messages_requires_chat_or_me() {
+        // 둘 다 없으면 CLI 대화형 선택을 피하려 에러여야 한다.
+        assert!(build_argv("messages", &json!({ "limit": 10 })).is_err());
+        assert!(build_argv("messages", &json!({ "chat": "x" })).is_ok());
+        assert!(build_argv("messages", &json!({ "me": true })).is_ok());
     }
 }
