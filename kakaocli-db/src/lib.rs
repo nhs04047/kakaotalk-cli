@@ -15,6 +15,11 @@ use rusqlite::{params, Connection, OpenFlags};
 use serde_json::Value;
 use thiserror::Error;
 
+/// macOS 집계 결과: `(by_room, by_date, by_hour, total)`.
+pub type MacStats = (Vec<(i64, i64)>, Vec<(String, i64)>, Vec<(u8, i64)>, i64);
+/// Windows 한 방 집계 결과: `(count, by_date, by_hour)`.
+pub type RoomStats = (i64, Vec<(String, i64)>, Vec<(u8, i64)>);
+
 // ── Row helpers ─────────────────────────────────────────────
 
 /// KakaoTalk의 시각 컬럼(sentAt/lastUpdatedAt 등)은 SQLite 동적 타입 때문에 같은
@@ -804,6 +809,126 @@ impl Database {
             None => Ok(None),
             Some(c) => Ok(Some((c.id, c.display_name.clone()))),
         }
+    }
+
+    // ── Stats (집계) ─────────────────────────────────────────
+
+    /// Grouped COUNT(*) over a message table. `group_expr` is the SELECT key
+    /// expression (code-controlled, never user input). `deleted_filter` adds the
+    /// Windows soft-delete guard. Returns `(key, count)` rows.
+    fn agg_counts(
+        &self,
+        table: &str,
+        timecol: &str,
+        group_expr: &str,
+        deleted_filter: bool,
+        since: Option<i64>,
+        order_by: &str,
+    ) -> Result<Vec<(String, i64)>, DbError> {
+        let del = if deleted_filter {
+            "(deleted IS NULL OR deleted = 0)"
+        } else {
+            "1=1"
+        };
+        let sql = format!(
+            "SELECT CAST(({group_expr}) AS TEXT) AS k, COUNT(*) AS c \
+             FROM {table} \
+             WHERE {del} AND (? IS NULL OR {timecol} >= ?) \
+             GROUP BY k ORDER BY {order_by}"
+        );
+        let mut stmt = self
+            .conn
+            .prepare(&sql)
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![since, since], |row| {
+                let k: Option<String> = row.get(0)?;
+                Ok((k.unwrap_or_default(), row.get::<_, i64>(1)?))
+            })
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok(rows)
+    }
+
+    /// Local-time date grouping expr for a given epoch-seconds column.
+    fn date_expr(col: &str) -> String {
+        format!("strftime('%Y-%m-%d', datetime({col}, 'unixepoch', 'localtime'))")
+    }
+    fn hour_expr(col: &str) -> String {
+        format!("strftime('%H', datetime({col}, 'unixepoch', 'localtime'))")
+    }
+
+    /// macOS aggregate over `NTChatMessage`: `(by_room, by_date, by_hour, total)`.
+    pub fn stats_mac(&self, since: Option<i64>) -> Result<MacStats, DbError> {
+        let by_room = self
+            .agg_counts("NTChatMessage", "sentAt", "chatId", false, since, "c DESC")?
+            .into_iter()
+            .filter_map(|(k, c)| k.parse::<i64>().ok().map(|id| (id, c)))
+            .collect();
+        let by_date = self.agg_counts(
+            "NTChatMessage",
+            "sentAt",
+            &Self::date_expr("sentAt"),
+            false,
+            since,
+            "k ASC",
+        )?;
+        let by_hour = self
+            .agg_counts(
+                "NTChatMessage",
+                "sentAt",
+                &Self::hour_expr("sentAt"),
+                false,
+                since,
+                "k ASC",
+            )?
+            .into_iter()
+            .filter_map(|(k, c)| k.parse::<u8>().ok().map(|h| (h, c)))
+            .collect();
+        let total = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM NTChatMessage WHERE (? IS NULL OR sentAt >= ?)",
+                params![since, since],
+                |r| r.get(0),
+            )
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        Ok((by_room, by_date, by_hour, total))
+    }
+
+    /// Windows aggregate over one room's `chatLogs`: `(count, by_date, by_hour)`.
+    pub fn stats_room_windows(&self, since: Option<i64>) -> Result<RoomStats, DbError> {
+        let count: i64 = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM chatLogs \
+                 WHERE (deleted IS NULL OR deleted = 0) AND (? IS NULL OR sendAt >= ?)",
+                params![since, since],
+                |r| r.get(0),
+            )
+            .map_err(|e| DbError::QueryFailed(e.to_string()))?;
+        let by_date = self.agg_counts(
+            "chatLogs",
+            "sendAt",
+            &Self::date_expr("sendAt"),
+            true,
+            since,
+            "k ASC",
+        )?;
+        let by_hour = self
+            .agg_counts(
+                "chatLogs",
+                "sendAt",
+                &Self::hour_expr("sendAt"),
+                true,
+                since,
+                "k ASC",
+            )?
+            .into_iter()
+            .filter_map(|(k, c)| k.parse::<u8>().ok().map(|h| (h, c)))
+            .collect();
+        Ok((count, by_date, by_hour))
     }
 }
 

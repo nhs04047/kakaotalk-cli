@@ -96,6 +96,50 @@ pub struct SearchResults {
     pub friends: Vec<Friend>,
 }
 
+/// Message statistics (aggregated from the local DB).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Stats {
+    /// Total messages counted (within the covered rooms and optional `--since`).
+    pub total: i64,
+    /// Per-room message counts, highest first.
+    pub by_room: Vec<RoomStat>,
+    /// Per-day message counts (local date, `YYYY-MM-DD`), chronological.
+    pub by_date: Vec<DateStat>,
+    /// Per-hour-of-day message counts (local hour 0–23).
+    pub by_hour: Vec<HourStat>,
+    /// Which rooms this aggregate actually covered. On Windows only rooms whose
+    /// DEK is resident (opened in the app) can be counted, so this can be partial.
+    pub coverage: StatsCoverage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomStat {
+    pub chat_id: i64,
+    pub name: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DateStat {
+    pub date: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HourStat {
+    pub hour: u8,
+    pub count: i64,
+}
+
+/// Room coverage of a stats aggregate. `partial` is true when `rooms_counted`
+/// is less than `rooms_total` (Windows: some rooms were never opened).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatsCoverage {
+    pub rooms_counted: usize,
+    pub rooms_total: usize,
+    pub partial: bool,
+}
+
 /// Application status result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppInfo {

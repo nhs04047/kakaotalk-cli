@@ -1108,6 +1108,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kakaocli-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kakaocli-platform"
 version = "0.1.0"
 dependencies = [

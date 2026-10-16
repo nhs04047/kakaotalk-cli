@@ -104,16 +104,23 @@ kakaocli <COMMAND> [OPTIONS]
 
 | 명령 | 별칭 | 설명 |
 |---|---|---|
-| `check` | `status` | 앱/권한/DB 상태 확인 |
+| `check` | `status`, `doctor` | 앱/권한/DB 상태 확인 |
 | `auth` | | DB 복호화 검증 |
 | `chats` | `rooms` | 채팅방 목록 (`--limit`) |
-| `msg` | `messages` | 메시지 조회 (`--chat`, `--since`, `--limit`) |
+| `msg` | `messages` | 메시지 조회 (`--chat`/`--me`, `--since`, `--limit`) |
 | `find <KEYWORD>` | `search` | 메시지 검색 (`--exact`/`--regex`/`--rooms`/`--friends`/`--all`) |
+| `stats` | | 메시지 통계: 방별·날짜별·시간대별 (`--since`, `--top`) |
 | `query <SQL>` | | Raw SQL(읽기 전용) |
 | `send [CHAT] [MSG]` | `say` | 메시지 전송 (`--me`, `--dry-run`, `-y`) |
-| `sync` | `tail` | 새 메시지 증분 폴링 (`--follow`, `--interval`, `--chat`, `--since`, `--webhook`) |
+| `sync` | `tail`, `watch` | 새 메시지 증분 폴링 (`--follow`, `--interval`, `--chat`, `--since`, `--webhook`) |
 | `inspect` | | 접근성 트리 덤프(디버깅, `--chat`, `--depth`) |
 | `login` | | 크레덴셜 저장/확인/삭제 (`--email`, `--password`, `--status`, `--clear`) |
+
+> **Windows 주의**: `stats`·`sync`는 앱에서 **연 적 있는 방**만 집계·감시할 수 있습니다(방별 키가 프로세스에 상주해야 함). 결과의 `coverage.partial`로 부분 집계 여부를 알립니다.
+
+### MCP 서버 (에이전트용)
+
+`kakaocli-mcp`는 위 기능을 MCP 도구로 노출하는 stdio 서버입니다. 등록·도구 목록은 [`docs/mcp.md`](docs/mcp.md), 에이전트 사용 지침은 [`SKILL.md`](SKILL.md) 참고. `send`는 `confirm:true`일 때만 실제 전송하고 기본은 미리보기입니다.
 
 ### 예시
 

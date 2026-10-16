@@ -5,6 +5,7 @@ members = [
     "kakaocli-platform",
     "kakaocli-auth",
     "kakaocli-cli",
+    "kakaocli-mcp",
 ]
 resolver = "2"
 
