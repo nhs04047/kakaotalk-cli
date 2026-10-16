@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "kakaocli-auth"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "keyring",
  "serde",
@@ -1058,7 +1058,7 @@ dependencies = [
 
 [[package]]
 name = "kakaocli-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "kakaocli-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1097,7 +1097,7 @@ dependencies = [
 
 [[package]]
 name = "kakaocli-db"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "kakaocli-core",
  "rusqlite",
@@ -1109,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "kakaocli-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "kakaocli-platform"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "accessibility",
  "aes",
