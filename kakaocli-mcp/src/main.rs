@@ -139,16 +139,17 @@ fn tool_specs() -> Value {
         },
         {
             "name": "send",
-            "description": "메시지를 전송한다. 안전을 위해 confirm=true 일 때만 실제 전송하고, 그 외에는 미리보기(dry-run)만 수행한다.",
+            "description": "메시지/파일/이미지를 전송한다. message(텍스트) 또는 files/clipboard(첨부, 현재 Windows) 중 하나. 안전을 위해 confirm=true 일 때만 실제 전송하고, 그 외에는 미리보기(dry-run)만 한다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "chat": { "type": "string", "description": "채팅방 이름. me=true면 생략" },
                     "me": { "type": "boolean", "description": "나와의 채팅으로 전송" },
-                    "message": { "type": "string" },
+                    "message": { "type": "string", "description": "보낼 텍스트" },
+                    "files": { "type": "array", "items": { "type": "string" }, "description": "보낼 파일 경로(최대 30). Windows 전용" },
+                    "clipboard": { "type": "boolean", "description": "현재 클립보드의 이미지·파일 전송. Windows 전용" },
                     "confirm": { "type": "boolean", "description": "true여야 실제 전송. 기본 false(미리보기)" }
-                },
-                "required": ["message"]
+                }
             }
         }
     ])
@@ -245,7 +246,18 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             a.push("--json".into());
         }
         "send" => {
-            let msg = s("message").ok_or("message가 필요합니다")?;
+            let files: Vec<String> = args
+                .get("files")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let clipboard = b("clipboard");
+            let attach = !files.is_empty() || clipboard;
+
             a.push("send".into());
             if b("me") {
                 a.push("--me".into());
@@ -254,7 +266,21 @@ fn build_argv(name: &str, args: &Value) -> Result<Vec<String>, String> {
             } else {
                 return Err("chat 또는 me가 필요합니다".into());
             }
-            a.push(msg);
+
+            if attach {
+                // 파일/클립보드 전송: 텍스트 메시지와 함께 쓰지 않는다.
+                for f in &files {
+                    a.push("--file".into());
+                    a.push(f.clone());
+                }
+                if clipboard {
+                    a.push("--clipboard".into());
+                }
+            } else {
+                let msg = s("message").ok_or("message 또는 files/clipboard가 필요합니다")?;
+                a.push(msg);
+            }
+
             if b("confirm") {
                 a.push("--yes".into()); // 실제 전송 (비대화형)
             } else {
@@ -351,6 +377,25 @@ mod tests {
     #[test]
     fn find_requires_keyword() {
         assert!(build_argv("find", &json!({})).is_err());
+    }
+
+    #[test]
+    fn send_files_attach_mode() {
+        let a = build_argv(
+            "send",
+            &json!({ "me": true, "files": ["a.png", "b.pdf"], "confirm": true }),
+        )
+        .unwrap();
+        assert_eq!(
+            a,
+            vec!["send", "--me", "--file", "a.png", "--file", "b.pdf", "--yes"]
+        );
+    }
+
+    #[test]
+    fn send_clipboard_attach_mode_defaults_dry_run() {
+        let a = build_argv("send", &json!({ "chat": "짱정하", "clipboard": true })).unwrap();
+        assert_eq!(a, vec!["send", "짱정하", "--clipboard", "--dry-run"]);
     }
 
     #[test]

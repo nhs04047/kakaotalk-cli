@@ -23,6 +23,25 @@ pub(crate) mod winsend;
 pub fn send_self_message(self_title: &str, text: &str) -> Result<(), PlatformError> {
     winsend::send_self_message(self_title, text)
 }
+
+/// 파일·이미지(또는 클립보드) 전송 (Windows). `paths`가 `None`이면 현재 클립보드 내용을
+/// 전송한다. 대상 채팅창이 열려 있어야 한다(텍스트 전송과 동일).
+#[cfg(target_os = "windows")]
+pub fn send_attachment(
+    chat_name: &str,
+    paths: Option<&[std::path::PathBuf]>,
+) -> Result<(), PlatformError> {
+    winsend::send_attachment_message(chat_name, paths)
+}
+
+/// 자기채팅으로 파일·이미지(또는 클립보드) 전송 (Windows).
+#[cfg(target_os = "windows")]
+pub fn send_self_attachment(
+    self_title: &str,
+    paths: Option<&[std::path::PathBuf]>,
+) -> Result<(), PlatformError> {
+    winsend::send_self_attachment(self_title, paths)
+}
 #[cfg(target_os = "windows")]
 pub(crate) mod winuia;
 

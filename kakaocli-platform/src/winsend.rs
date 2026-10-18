@@ -13,17 +13,23 @@
 //! 오작동 위험 → 미지원). 자기채팅은 친구 탭 최상단 프로필 더블클릭으로 연다.
 
 use std::mem::size_of;
+use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 
 use windows::core::BOOL;
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT};
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY, VK_RETURN,
+    MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY, VK_CONTROL, VK_RETURN,
 };
+use windows::Win32::UI::Shell::DROPFILES;
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumChildWindows, EnumWindows, GetDlgCtrlID, GetForegroundWindow,
     GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
@@ -115,15 +121,28 @@ fn deliver_matched(
     let edit = find_richedit(hwnd)
         .ok_or_else(|| PlatformError::UiError("입력창(RichEdit)을 찾지 못했습니다".into()))?;
 
-    // KakaoTalk은 저수준 입력만 "전송"으로 인정한다(WM_SETTEXT/WM_CHAR로는 전송버튼이
-    // 안 켜짐). 전송에는 실제 키 입력(SendInput)이 필요하고 이는 포그라운드 창에만
-    // 들어간다. 화면에 안 보이게 하려고 채팅창을 잠깐 화면 밖으로 옮겨 포그라운드로
-    // 만든 뒤 입력하고, 원래 포그라운드 창을 복원하고 채팅창을 제자리로 되돌린다.
+    within_focused(hwnd, edit, || {
+        let sanitized = text.replace(['\r', '\n'], " ");
+        type_unicode(&sanitized);
+        sleep(Duration::from_millis(120));
+        press_enter();
+        sleep(Duration::from_millis(200));
+    });
+    dbg_send(|| format!("전송 완료(화면 밖 입력): edit=0x{:X}", edit.0 as usize));
+
+    Ok(())
+}
+
+/// 채팅창 입력 컨트롤에 포커스를 준 상태로 `f`를 실행한다(저수준 입력용).
+///
+/// KakaoTalk은 저수준 입력(SendInput)만 "전송"으로 인정하고, 이는 포그라운드 창에만
+/// 들어간다. 화면에 안 보이게 하려고 채팅창을 잠깐 화면 밖으로 옮겨 포그라운드로 만든
+/// 뒤 `f`로 입력하고, 원래 포그라운드 창과 채팅창 위치를 되돌린다.
+fn within_focused(hwnd: HWND, edit: HWND, f: impl FnOnce()) {
     let prev = unsafe { GetForegroundWindow() };
     let orig = window_rect(hwnd);
     let was_min = unsafe { IsIconic(hwnd) }.as_bool();
     unsafe {
-        // 화면 밖으로 이동(비활성). 최소화 상태면 화면 밖에서 복원해 입력 가능하게.
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -140,14 +159,8 @@ fn deliver_matched(
     }
     sleep(Duration::from_millis(150));
 
-    let sanitized = text.replace(['\r', '\n'], " ");
-    type_unicode(&sanitized);
-    sleep(Duration::from_millis(120));
-    press_enter();
-    sleep(Duration::from_millis(200));
+    f();
 
-    // 원래 포그라운드 창(예: 터미널) 복원 후, 채팅창을 원위치로(비활성). 원래
-    // 최소화 상태였으면 다시 최소화.
     if (prev.0 as usize) != 0 && prev != hwnd {
         foreground_offscreen(prev);
     }
@@ -165,9 +178,6 @@ fn deliver_matched(
             let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_MINIMIZE);
         }
     }
-    dbg_send(|| format!("전송 완료(화면 밖 입력): edit=0x{:X}", edit.0 as usize));
-
-    Ok(())
 }
 
 /// 창을 위치 변경 없이(SW_RESTORE로 원위치 튀는 것 방지) 포그라운드로 만든다.
@@ -467,6 +477,196 @@ fn key_unicode(scan: u16, up: bool) -> INPUT {
                 wVk: VIRTUAL_KEY(0),
                 wScan: scan,
                 dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+// ── 첨부(파일·이미지) 전송 ───────────────────────────────────
+
+const CF_HDROP: u32 = 15;
+
+/// 파일·이미지 전송(열린 채팅창에 클립보드 붙여넣기). 파일 경로들을 CF_HDROP로
+/// 클립보드에 올린 뒤 입력창에 Ctrl+V → Enter. KakaoTalk은 복사된 파일 붙여넣기를
+/// 첨부로 인식한다(이미지 파일은 사진으로). 창은 미리 열려 있어야 한다(텍스트와 동일).
+/// `paths`가 `Some`이면 그 파일들을, `None`이면 현재 클립보드 내용을 전송한다.
+pub fn send_attachment_message(
+    chat_name: &str,
+    paths: Option<&[PathBuf]>,
+) -> Result<(), PlatformError> {
+    let pid = crate::dek::find_kakao_pid().ok_or(PlatformError::AppNotAvailable)?;
+    let windows = enum_chat_windows(pid);
+    if !windows.iter().any(|(_, t)| title_matches(t, chat_name)) {
+        return Err(PlatformError::Other(format!(
+            "'{}' 채팅창이 열려 있지 않습니다 — KakaoTalk에서 해당 채팅방을 먼저 연 뒤 다시 시도하세요.",
+            chat_name
+        )));
+    }
+    deliver_attachment(&windows, chat_name, paths)
+}
+
+/// 자기채팅(나와의 채팅)으로 파일·이미지(또는 클립보드) 전송.
+pub fn send_self_attachment(
+    self_title: &str,
+    paths: Option<&[PathBuf]>,
+) -> Result<(), PlatformError> {
+    let pid = crate::dek::find_kakao_pid().ok_or(PlatformError::AppNotAvailable)?;
+    let mut windows = enum_chat_windows(pid);
+    if !windows.iter().any(|(_, t)| title_matches(t, self_title)) {
+        open_self_chat(pid)?;
+        windows = enum_chat_windows(pid);
+    }
+    deliver_attachment(&windows, self_title, paths)
+}
+
+fn deliver_attachment(
+    windows: &[(HWND, String)],
+    expected: &str,
+    paths: Option<&[PathBuf]>,
+) -> Result<(), PlatformError> {
+    let matched: Vec<&(HWND, String)> = windows
+        .iter()
+        .filter(|(_, t)| title_matches(t, expected))
+        .collect();
+    let (hwnd, title) = match matched.as_slice() {
+        [] => {
+            return Err(PlatformError::Other(format!(
+                "'{}' 채팅창을 열지 못했습니다 — KakaoTalk에서 해당 채팅방을 직접 연 뒤 다시 시도하세요.",
+                expected
+            )))
+        }
+        [one] => (one.0, one.1.clone()),
+        many => {
+            return Err(PlatformError::AmbiguousChatName {
+                name: expected.to_string(),
+                matches: many.iter().map(|(_, t)| t.clone()).collect(),
+            })
+        }
+    };
+    // 안전: 전송 직전 제목 재확인(오발송 방지).
+    if !title_matches(&title, expected) {
+        return Err(PlatformError::ChatVerificationFailed {
+            expected: expected.to_string(),
+            actual: title,
+        });
+    }
+    let edit = find_richedit(hwnd)
+        .ok_or_else(|| PlatformError::UiError("입력창(RichEdit)을 찾지 못했습니다".into()))?;
+
+    // 파일 지정 시 클립보드에 올린다(전역이라 포커스 전에). None이면 현재 클립보드 사용.
+    if let Some(paths) = paths {
+        set_clipboard_files(paths)?;
+    }
+
+    within_focused(hwnd, edit, || {
+        press_ctrl_v();
+        // 첨부는 KakaoTalk이 파일을 읽어 미리보기를 만드는 시간이 필요해 넉넉히 대기.
+        sleep(Duration::from_millis(1200));
+        press_enter();
+        sleep(Duration::from_millis(600));
+    });
+    dbg_send(|| {
+        format!(
+            "첨부 전송 완료: {}",
+            paths
+                .map(|p| format!("{}개", p.len()))
+                .unwrap_or_else(|| "클립보드".into())
+        )
+    });
+    Ok(())
+}
+
+/// 파일 경로들을 CF_HDROP 형식으로 클립보드에 올린다(Explorer 복사와 동일).
+fn set_clipboard_files(paths: &[PathBuf]) -> Result<(), PlatformError> {
+    // 절대 경로 UTF-16(각각 널 종료) + 마지막 추가 널.
+    let mut list: Vec<u16> = Vec::new();
+    for p in paths {
+        let abs = std::fs::canonicalize(p).map_err(|e| {
+            PlatformError::Other(format!("파일 경로 확인 실패 {}: {}", p.display(), e))
+        })?;
+        // canonicalize의 \\?\ 접두사는 CF_HDROP에서 제거한다.
+        let s = abs.to_string_lossy();
+        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+        list.extend(s.encode_utf16());
+        list.push(0);
+    }
+    list.push(0); // double-null terminator
+
+    let header = size_of::<DROPFILES>();
+    let total = header + list.len() * 2;
+
+    unsafe {
+        let hglobal: HGLOBAL = GlobalAlloc(GMEM_MOVEABLE, total)
+            .map_err(|e| PlatformError::Other(format!("GlobalAlloc 실패: {e}")))?;
+        let ptr = GlobalLock(hglobal);
+        if ptr.is_null() {
+            return Err(PlatformError::Other("GlobalLock 실패".into()));
+        }
+        // DROPFILES 헤더.
+        let df = ptr as *mut DROPFILES;
+        (*df).pFiles = header as u32;
+        (*df).pt = POINT { x: 0, y: 0 };
+        (*df).fNC = BOOL(0);
+        (*df).fWide = BOOL(1); // UTF-16 경로.
+                               // 파일 목록 복사.
+        let dst = (ptr as *mut u8).add(header) as *mut u16;
+        std::ptr::copy_nonoverlapping(list.as_ptr(), dst, list.len());
+        let _ = GlobalUnlock(hglobal);
+
+        // 클립보드 열기(점유 중일 수 있어 몇 번 재시도).
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(None).is_ok() {
+                opened = true;
+                break;
+            }
+            sleep(Duration::from_millis(50));
+        }
+        if !opened {
+            // 드문 실패 경로: 작은 할당은 그대로 둔다(프로세스 종료 시 회수).
+            return Err(PlatformError::Other("클립보드를 열지 못했습니다".into()));
+        }
+        let _ = EmptyClipboard();
+        if SetClipboardData(CF_HDROP, Some(HANDLE(hglobal.0))).is_err() {
+            let _ = CloseClipboard();
+            return Err(PlatformError::Other(
+                "클립보드에 파일을 올리지 못했습니다".into(),
+            ));
+        }
+        // 성공 시 소유권이 시스템으로 넘어가므로 GlobalFree 하지 않는다.
+        let _ = CloseClipboard();
+    }
+    Ok(())
+}
+
+/// Ctrl+V(붙여넣기)를 저수준 입력으로 보낸다.
+fn press_ctrl_v() {
+    const V: u16 = 0x56;
+    let seq = [
+        vk_input(VK_CONTROL.0, false),
+        vk_input(V, false),
+        vk_input(V, true),
+        vk_input(VK_CONTROL.0, true),
+    ];
+    unsafe {
+        SendInput(&seq, size_of::<INPUT>() as i32);
+    }
+}
+
+fn vk_input(vk: u16, up: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                wScan: 0,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
                 time: 0,
                 dwExtraInfo: 0,
             },

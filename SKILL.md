@@ -42,7 +42,11 @@ kakaocli find "회의" --json            # 검색 (--rooms/--friends/--all)
 kakaocli stats --since 30d --json     # 통계
 kakaocli watch --follow               # 새 메시지 감시 (별칭: sync/tail)
 kakaocli send "짱정하" "안녕" --dry-run # 미리보기 (실제 전송은 --yes)
+kakaocli send --me --file a.png --file b.pdf -y   # 파일·이미지 전송(최대 30개)
+kakaocli send "짱정하" --clipboard -y             # 현재 클립보드의 이미지·파일 전송
 ```
+
+> 파일·이미지 전송(`--file`/`--clipboard`)은 현재 **Windows 전용**이며, 텍스트 전송과 마찬가지로 **대상 채팅창이 열려 있어야** 합니다(열린 창에 클립보드 붙여넣기 방식). 첨부와 텍스트 메시지는 함께 보낼 수 없습니다.
 
 ## 전송 규칙 (중요)
 
