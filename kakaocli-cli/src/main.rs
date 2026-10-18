@@ -42,7 +42,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// 앱/권한/DB 상태 확인
-    #[command(aliases = ["status"])]
+    #[command(aliases = ["status", "doctor"])]
     Check,
 
     /// DB 복호화 검증
@@ -61,6 +61,10 @@ enum Command {
         /// 채팅방 이름 (부분일치, 생략 시 인터랙티브 선택)
         #[arg(long)]
         chat: Option<String>,
+
+        /// 자기채팅(나와의 채팅) 조회. 이름 없이 타입으로 특정한다
+        #[arg(long, conflicts_with = "chat")]
+        me: bool,
 
         /// 시간 범위 (예: 1h, 30m, 7d, 2026-09-07)
         #[arg(long)]
@@ -100,6 +104,16 @@ enum Command {
     /// Raw SQL 쿼리 (읽기 전용)
     Query { sql: String },
 
+    /// 메시지 통계 (방별·날짜별·시간대별 집계)
+    Stats {
+        /// 시간 범위 (예: 7d, 30d, 2026-09-01). 생략 시 전체 기간
+        #[arg(long)]
+        since: Option<String>,
+        /// 방별 상위 N개 표시 (기본 20)
+        #[arg(long, default_value = "20")]
+        top: usize,
+    },
+
     /// 메시지 전송 (Phase 2)
     #[command(aliases = ["say"])]
     Send {
@@ -130,7 +144,7 @@ enum Command {
     },
 
     /// 새 메시지 모니터링 (증분 폴링 스트림)
-    #[command(aliases = ["tail"])]
+    #[command(aliases = ["tail", "watch"])]
     Sync {
         /// 지속 폴링 (생략 시 1회 캐치업 후 종료)
         #[arg(long)]
@@ -178,9 +192,12 @@ fn main() {
         Command::Check => cmd_check(&cli),
         Command::Auth => cmd_auth(&cli),
         Command::Chats { limit } => cmd_chats(&cli, *limit),
-        Command::Msg { chat, since, limit } => {
-            cmd_messages(&cli, chat.as_deref(), since.as_deref(), *limit)
-        }
+        Command::Msg {
+            chat,
+            me,
+            since,
+            limit,
+        } => cmd_messages(&cli, chat.as_deref(), *me, since.as_deref(), *limit),
         Command::Find {
             keyword,
             exact,
@@ -190,6 +207,7 @@ fn main() {
             all,
         } => cmd_find(&cli, keyword, *exact, *regex, *rooms, *friends, *all),
         Command::Query { sql } => cmd_query(&cli, sql),
+        Command::Stats { since, top } => cmd_stats(&cli, since.as_deref(), *top),
         Command::Send {
             chat,
             message,
@@ -518,6 +536,7 @@ fn cmd_chats_windows(cli: &Cli, limit: u32) -> Result<(), String> {
 fn cmd_messages_windows(
     cli: &Cli,
     chat: Option<&str>,
+    me: bool,
     since: Option<&str>,
     limit: u32,
 ) -> Result<(), String> {
@@ -539,22 +558,30 @@ fn cmd_messages_windows(
         .list_chats_windows(999)
         .map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
 
-    let (chat_id, chat_name) = match chat {
-        Some(name) => {
-            let m = chats
-                .iter()
-                .find(|c| c.display_name.contains(name))
-                .ok_or_else(|| {
-                    format!("'{}' 채팅방을 찾지 못했습니다. 이름 없이 실행하면 목록에서 고를 수 있어요.", name)
-                })?;
-            (m.id, m.display_name.clone())
-        }
-        None => {
-            let choices: Vec<ChatChoice> = chats.into_iter().map(ChatChoice).collect();
-            let sel = inquire::Select::new("채팅방을 선택하세요:", choices)
-                .prompt()
-                .map_err(|e| format!("채팅방 선택이 취소되었습니다: {}", e))?;
-            (sel.0.id, sel.0.display_name)
+    let (chat_id, chat_name) = if me {
+        let sc = chats
+            .iter()
+            .find(|c| c.chat_type == ChatType::SelfChat)
+            .ok_or_else(|| "자기채팅(나와의 채팅)을 찾지 못했습니다.".to_string())?;
+        (sc.id, sc.display_name.clone())
+    } else {
+        match chat {
+            Some(name) => {
+                let m = chats
+                    .iter()
+                    .find(|c| c.display_name.contains(name))
+                    .ok_or_else(|| {
+                        format!("'{}' 채팅방을 찾지 못했습니다. 이름 없이 실행하면 목록에서 고를 수 있어요.", name)
+                    })?;
+                (m.id, m.display_name.clone())
+            }
+            None => {
+                let choices: Vec<ChatChoice> = chats.into_iter().map(ChatChoice).collect();
+                let sel = inquire::Select::new("채팅방을 선택하세요:", choices)
+                    .prompt()
+                    .map_err(|e| format!("채팅방 선택이 취소되었습니다: {}", e))?;
+                (sel.0.id, sel.0.display_name)
+            }
         }
     };
 
@@ -604,16 +631,17 @@ fn cmd_messages_windows(
 fn cmd_messages(
     cli: &Cli,
     chat: Option<&str>,
+    me: bool,
     since: Option<&str>,
     limit: u32,
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        cmd_messages_windows(cli, chat, since, limit)
+        cmd_messages_windows(cli, chat, me, since, limit)
     }
     #[cfg(not(windows))]
     {
-        cmd_messages_unix(cli, chat, since, limit)
+        cmd_messages_unix(cli, chat, me, since, limit)
     }
 }
 
@@ -621,18 +649,29 @@ fn cmd_messages(
 fn cmd_messages_unix(
     cli: &Cli,
     chat: Option<&str>,
+    me: bool,
     since: Option<&str>,
     limit: u32,
 ) -> Result<(), String> {
     let db = open_db(cli)?;
 
-    // Resolve chat name to chat ID (interactive pick when omitted)
-    let (chat_id, chat_name) = match chat {
-        Some(name) => db
-            .resolve_chat_id(name)
+    // Resolve chat name to chat ID (interactive pick when omitted; --me = self-chat)
+    let (chat_id, chat_name) = if me {
+        let sc = db
+            .list_chats(9999)
             .map_err(|e| format!("채팅방 조회 실패: {}", e))?
-            .ok_or_else(|| format!("'{}' 채팅방을 찾지 못했습니다. 이름 없이 실행하면 목록에서 고를 수 있어요 (kakaocli msg)", name))?,
-        None => pick_chat_interactive(&db)?,
+            .into_iter()
+            .find(|c| c.chat_type == kakaocli_core::model::ChatType::SelfChat)
+            .ok_or_else(|| "자기채팅(나와의 채팅)을 찾지 못했습니다.".to_string())?;
+        (sc.id, sc.display_name)
+    } else {
+        match chat {
+            Some(name) => db
+                .resolve_chat_id(name)
+                .map_err(|e| format!("채팅방 조회 실패: {}", e))?
+                .ok_or_else(|| format!("'{}' 채팅방을 찾지 못했습니다. 이름 없이 실행하면 목록에서 고를 수 있어요 (kakaocli msg)", name))?,
+            None => pick_chat_interactive(&db)?,
+        }
     };
 
     // Parse since
@@ -924,6 +963,202 @@ fn cmd_query(cli: &Cli, sql: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ── Stats ───────────────────────────────────────────────────
+
+fn cmd_stats(cli: &Cli, since: Option<&str>, top: usize) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        cmd_stats_windows(cli, since, top)
+    }
+    #[cfg(not(windows))]
+    {
+        cmd_stats_unix(cli, since, top)
+    }
+}
+
+#[cfg(not(windows))]
+fn cmd_stats_unix(cli: &Cli, since: Option<&str>, top: usize) -> Result<(), String> {
+    use kakaocli_core::model::*;
+
+    let db = open_db(cli)?;
+    let since_ts = parse_since(since);
+    let (by_room_raw, by_date_raw, by_hour_raw, total) = db
+        .stats_mac(since_ts)
+        .map_err(|e| format!("통계 집계 실패: {}", e))?;
+
+    let name_map: HashMap<i64, String> = db
+        .list_chats(9999)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|c| (c.id, c.display_name))
+        .collect();
+
+    let mut by_room: Vec<RoomStat> = by_room_raw
+        .into_iter()
+        .map(|(id, count)| RoomStat {
+            chat_id: id,
+            name: name_map
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| "(unknown)".into()),
+            count,
+        })
+        .collect();
+    by_room.sort_by_key(|r| std::cmp::Reverse(r.count));
+    let rooms_total = by_room.len();
+    by_room.truncate(top);
+
+    let stats = Stats {
+        total,
+        by_room,
+        by_date: by_date_raw
+            .into_iter()
+            .map(|(date, count)| DateStat { date, count })
+            .collect(),
+        by_hour: by_hour_raw
+            .into_iter()
+            .map(|(hour, count)| HourStat { hour, count })
+            .collect(),
+        coverage: StatsCoverage {
+            rooms_counted: rooms_total,
+            rooms_total,
+            partial: false,
+        },
+    };
+    output_stats(cli, &stats)
+}
+
+/// Windows: 상주 DEK가 있는 chatLogs_*.edb만 집계(앱에서 연 방). 전 방이 아닐 수
+/// 있어 coverage.partial로 부분 집계임을 알린다.
+#[cfg(windows)]
+fn cmd_stats_windows(cli: &Cli, since: Option<&str>, top: usize) -> Result<(), String> {
+    use kakaocli_core::model::*;
+    use kakaocli_platform::dek;
+    use std::collections::BTreeMap;
+
+    let since_ts = parse_since(since);
+    let user_dir = kakaocli_core::db_path::windows_user_dir()
+        .ok_or_else(|| "KakaoTalk 사용자 디렉터리를 찾지 못했습니다.".to_string())?;
+    let chat_data = user_dir.join("chat_data");
+    let deks = dek::scan_deks(&user_dir).map_err(|e| format!("DEK 스캔 실패: {}", e))?;
+
+    let room_db = dek::open_edb_from(&deks, &chat_data.join("chatListInfo.edb"), 0)
+        .map_err(|e| format!("채팅방 목록을 열 수 없습니다: {}", e))?;
+    let chats = room_db
+        .list_chats_windows(9999)
+        .map_err(|e| format!("채팅방 목록 조회 실패: {}", e))?;
+    let name_map: HashMap<i64, String> = chats
+        .iter()
+        .map(|c| (c.id, c.display_name.clone()))
+        .collect();
+    let rooms_total = chats.len();
+
+    let mut by_room: Vec<RoomStat> = Vec::new();
+    let mut date_map: BTreeMap<String, i64> = BTreeMap::new();
+    let mut hour_arr = [0i64; 24];
+    let mut total = 0i64;
+    let mut rooms_counted = 0usize;
+
+    for fname in deks.keys() {
+        if let Some(rest) = fname.strip_prefix("chatLogs_") {
+            let chat_id: i64 = rest.trim_end_matches(".edb").parse().unwrap_or(0);
+            if let Ok(db) = dek::open_edb_from(&deks, &chat_data.join(fname), 0) {
+                if let Ok((count, by_date, by_hour)) = db.stats_room_windows(since_ts) {
+                    rooms_counted += 1;
+                    total += count;
+                    by_room.push(RoomStat {
+                        chat_id,
+                        name: name_map
+                            .get(&chat_id)
+                            .cloned()
+                            .unwrap_or_else(|| "(unknown)".into()),
+                        count,
+                    });
+                    for (d, c) in by_date {
+                        *date_map.entry(d).or_insert(0) += c;
+                    }
+                    for (h, c) in by_hour {
+                        if (h as usize) < 24 {
+                            hour_arr[h as usize] += c;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    by_room.sort_by_key(|r| std::cmp::Reverse(r.count));
+    by_room.truncate(top);
+
+    let stats = Stats {
+        total,
+        by_room,
+        by_date: date_map
+            .into_iter()
+            .map(|(date, count)| DateStat { date, count })
+            .collect(),
+        by_hour: (0..24u8)
+            .map(|h| HourStat {
+                hour: h,
+                count: hour_arr[h as usize],
+            })
+            .filter(|h| h.count > 0)
+            .collect(),
+        coverage: StatsCoverage {
+            rooms_counted,
+            rooms_total,
+            partial: rooms_counted < rooms_total,
+        },
+    };
+    output_stats(cli, &stats)
+}
+
+fn output_stats(cli: &Cli, stats: &kakaocli_core::model::Stats) -> Result<(), String> {
+    if cli.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(stats).map_err(|e| e.to_string())?
+        );
+        return Ok(());
+    }
+
+    println!("총 메시지: {}", stats.total);
+    if stats.coverage.partial {
+        println!(
+            "⚠ 부분 집계: {}/{} 방만 집계됨 (Windows는 앱에서 연 방만 읽힘)",
+            stats.coverage.rooms_counted, stats.coverage.rooms_total
+        );
+    }
+    if !stats.by_room.is_empty() {
+        println!("\n[방별 상위]");
+        for r in &stats.by_room {
+            println!("  {:>8}  {}", r.count, r.name);
+        }
+    }
+    if !stats.by_hour.is_empty() {
+        println!("\n[시간대별]");
+        let max = stats
+            .by_hour
+            .iter()
+            .map(|h| h.count)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        for h in &stats.by_hour {
+            let bar = "█".repeat(((h.count * 24) / max) as usize);
+            println!("  {:02}시  {:>7}  {}", h.hour, h.count, bar);
+        }
+    }
+    if !stats.by_date.is_empty() {
+        let tail: Vec<_> = stats.by_date.iter().rev().take(14).collect();
+        println!("\n[최근 날짜별]");
+        for d in tail.iter().rev() {
+            println!("  {}  {:>7}", d.date, d.count);
+        }
+    }
+    Ok(())
+}
+
 /// Windows: raw query targets one `.edb` (default `chatListInfo.edb`; override
 /// the filename with `--db-path`, resolved under the user dir / chat_data).
 #[cfg(windows)]
@@ -1130,6 +1365,14 @@ fn cmd_sync(
     webhook: Option<&str>,
     since: Option<&str>,
 ) -> Result<(), String> {
+    // 외부 통신은 기본 비활성(--webhook 없으면 전송 안 함). 사용할 때는 대상과
+    // 전송 데이터를 명시한다(보안정책: 외부 통신 대상·데이터 고지).
+    if let Some(url) = webhook {
+        eprintln!(
+            "⚠ 외부 전송 활성: 새 메시지(JSON: 방·발신자·본문·시각)를 {} 로 HTTP POST 합니다.",
+            url
+        );
+    }
     #[cfg(windows)]
     {
         cmd_sync_windows(cli, follow, interval, chat, webhook, since)

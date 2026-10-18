@@ -44,7 +44,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
-        run: cargo build --release -p kakaocli-cli --target ${{ matrix.target }}
+        run: cargo build --release -p kakaocli-cli -p kakaocli-mcp --target ${{ matrix.target }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
@@ -53,7 +53,9 @@ jobs:
           dist="kakaocli-${VERSION}-${{ matrix.target }}"
           mkdir "$dist"
           cp "target/${{ matrix.target }}/release/kakaocli" "$dist/"
-          cp README.md LICENSE "$dist/"
+          cp "target/${{ matrix.target }}/release/kakaocli-mcp" "$dist/"
+          cp README.md LICENSE SKILL.md "$dist/"
+          cp docs/mcp.md "$dist/" 2>/dev/null || true
           tar czf "$dist.tar.gz" "$dist"
           echo "ASSET=$dist.tar.gz" >> "$GITHUB_ENV"
 
@@ -64,7 +66,9 @@ jobs:
           $dist = "kakaocli-$env:VERSION-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $dist | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/kakaocli.exe" $dist/
-          Copy-Item README.md, LICENSE $dist/
+          Copy-Item "target/${{ matrix.target }}/release/kakaocli-mcp.exe" $dist/
+          Copy-Item README.md, LICENSE, SKILL.md $dist/
+          Copy-Item docs/mcp.md $dist/ -ErrorAction SilentlyContinue
           Compress-Archive -Path "$dist/*" -DestinationPath "$dist.zip"
           "ASSET=$dist.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
