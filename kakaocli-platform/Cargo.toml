@@ -36,8 +36,13 @@ windows = { version = "0.60", features = [
     "Win32_System_LibraryLoader",
     "Win32_Security_Cryptography",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_UI_Shell",
 ]}
 aes = "0.8"
+# 이미지 디코딩(파일 → 비트맵). 카카오톡은 CF_DIB(이미지) 붙여넣기만 받으므로
+# 이미지 파일을 디코딩해 DIB로 클립보드에 올린다. png/jpeg/gif/bmp/webp만.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 
 # === Linux/other: compile but panic at runtime ===
 [target.'cfg(not(any(target_os = "macos", target_os = "windows")))'.dependencies]

@@ -13,16 +13,21 @@
 //! 오작동 위험 → 미지원). 자기채팅은 친구 탭 최상단 프로필 더블클릭으로 연다.
 
 use std::mem::size_of;
+use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
 
 use windows::core::BOOL;
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, RECT};
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY, VK_RETURN,
+    MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY, VK_CONTROL, VK_RETURN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumChildWindows, EnumWindows, GetDlgCtrlID, GetForegroundWindow,
@@ -115,15 +120,28 @@ fn deliver_matched(
     let edit = find_richedit(hwnd)
         .ok_or_else(|| PlatformError::UiError("입력창(RichEdit)을 찾지 못했습니다".into()))?;
 
-    // KakaoTalk은 저수준 입력만 "전송"으로 인정한다(WM_SETTEXT/WM_CHAR로는 전송버튼이
-    // 안 켜짐). 전송에는 실제 키 입력(SendInput)이 필요하고 이는 포그라운드 창에만
-    // 들어간다. 화면에 안 보이게 하려고 채팅창을 잠깐 화면 밖으로 옮겨 포그라운드로
-    // 만든 뒤 입력하고, 원래 포그라운드 창을 복원하고 채팅창을 제자리로 되돌린다.
+    within_focused(hwnd, edit, || {
+        let sanitized = text.replace(['\r', '\n'], " ");
+        type_unicode(&sanitized);
+        sleep(Duration::from_millis(120));
+        press_enter();
+        sleep(Duration::from_millis(200));
+    });
+    dbg_send(|| format!("전송 완료(화면 밖 입력): edit=0x{:X}", edit.0 as usize));
+
+    Ok(())
+}
+
+/// 채팅창 입력 컨트롤에 포커스를 준 상태로 `f`를 실행한다(저수준 입력용).
+///
+/// KakaoTalk은 저수준 입력(SendInput)만 "전송"으로 인정하고, 이는 포그라운드 창에만
+/// 들어간다. 화면에 안 보이게 하려고 채팅창을 잠깐 화면 밖으로 옮겨 포그라운드로 만든
+/// 뒤 `f`로 입력하고, 원래 포그라운드 창과 채팅창 위치를 되돌린다.
+fn within_focused(hwnd: HWND, edit: HWND, f: impl FnOnce()) {
     let prev = unsafe { GetForegroundWindow() };
     let orig = window_rect(hwnd);
     let was_min = unsafe { IsIconic(hwnd) }.as_bool();
     unsafe {
-        // 화면 밖으로 이동(비활성). 최소화 상태면 화면 밖에서 복원해 입력 가능하게.
         let _ = SetWindowPos(
             hwnd,
             None,
@@ -140,14 +158,8 @@ fn deliver_matched(
     }
     sleep(Duration::from_millis(150));
 
-    let sanitized = text.replace(['\r', '\n'], " ");
-    type_unicode(&sanitized);
-    sleep(Duration::from_millis(120));
-    press_enter();
-    sleep(Duration::from_millis(200));
+    f();
 
-    // 원래 포그라운드 창(예: 터미널) 복원 후, 채팅창을 원위치로(비활성). 원래
-    // 최소화 상태였으면 다시 최소화.
     if (prev.0 as usize) != 0 && prev != hwnd {
         foreground_offscreen(prev);
     }
@@ -165,9 +177,6 @@ fn deliver_matched(
             let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_MINIMIZE);
         }
     }
-    dbg_send(|| format!("전송 완료(화면 밖 입력): edit=0x{:X}", edit.0 as usize));
-
-    Ok(())
 }
 
 /// 창을 위치 변경 없이(SW_RESTORE로 원위치 튀는 것 방지) 포그라운드로 만든다.
@@ -467,6 +476,231 @@ fn key_unicode(scan: u16, up: bool) -> INPUT {
                 wVk: VIRTUAL_KEY(0),
                 wScan: scan,
                 dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+// ── 이미지 첨부 전송 ─────────────────────────────────────────
+
+/// 파일·이미지 전송(열린 채팅창에 클립보드 붙여넣기). 파일 경로들을 CF_HDROP로
+/// 클립보드에 올린 뒤 입력창에 Ctrl+V → Enter. KakaoTalk은 복사된 파일 붙여넣기를
+/// 첨부로 인식한다(이미지 파일은 사진으로). 창은 미리 열려 있어야 한다(텍스트와 동일).
+/// `paths`가 `Some`이면 그 파일들을, `None`이면 현재 클립보드 내용을 전송한다.
+pub fn send_attachment_message(
+    chat_name: &str,
+    paths: Option<&[PathBuf]>,
+) -> Result<(), PlatformError> {
+    let pid = crate::dek::find_kakao_pid().ok_or(PlatformError::AppNotAvailable)?;
+    let windows = enum_chat_windows(pid);
+    if !windows.iter().any(|(_, t)| title_matches(t, chat_name)) {
+        return Err(PlatformError::Other(format!(
+            "'{}' 채팅창이 열려 있지 않습니다 — KakaoTalk에서 해당 채팅방을 먼저 연 뒤 다시 시도하세요.",
+            chat_name
+        )));
+    }
+    deliver_attachment(&windows, chat_name, paths)
+}
+
+/// 자기채팅(나와의 채팅)으로 파일·이미지(또는 클립보드) 전송.
+pub fn send_self_attachment(
+    self_title: &str,
+    paths: Option<&[PathBuf]>,
+) -> Result<(), PlatformError> {
+    let pid = crate::dek::find_kakao_pid().ok_or(PlatformError::AppNotAvailable)?;
+    let mut windows = enum_chat_windows(pid);
+    if !windows.iter().any(|(_, t)| title_matches(t, self_title)) {
+        open_self_chat(pid)?;
+        windows = enum_chat_windows(pid);
+    }
+    deliver_attachment(&windows, self_title, paths)
+}
+
+fn deliver_attachment(
+    windows: &[(HWND, String)],
+    expected: &str,
+    paths: Option<&[PathBuf]>,
+) -> Result<(), PlatformError> {
+    let matched: Vec<&(HWND, String)> = windows
+        .iter()
+        .filter(|(_, t)| title_matches(t, expected))
+        .collect();
+    let (hwnd, title) = match matched.as_slice() {
+        [] => {
+            return Err(PlatformError::Other(format!(
+                "'{}' 채팅창을 열지 못했습니다 — KakaoTalk에서 해당 채팅방을 직접 연 뒤 다시 시도하세요.",
+                expected
+            )))
+        }
+        [one] => (one.0, one.1.clone()),
+        many => {
+            return Err(PlatformError::AmbiguousChatName {
+                name: expected.to_string(),
+                matches: many.iter().map(|(_, t)| t.clone()).collect(),
+            })
+        }
+    };
+    // 안전: 전송 직전 제목 재확인(오발송 방지).
+    if !title_matches(&title, expected) {
+        return Err(PlatformError::ChatVerificationFailed {
+            expected: expected.to_string(),
+            actual: title,
+        });
+    }
+    let edit = find_richedit(hwnd)
+        .ok_or_else(|| PlatformError::UiError("입력창(RichEdit)을 찾지 못했습니다".into()))?;
+
+    match paths {
+        // 현재 클립보드 내용 그대로 붙여넣기(예: 사용자가 복사한 이미지).
+        None => within_focused(hwnd, edit, || {
+            press_ctrl_v();
+            sleep(Duration::from_millis(1200));
+            press_enter();
+            sleep(Duration::from_millis(600));
+        }),
+        // 파일: 카카오톡은 CF_DIB(이미지 비트맵) 붙여넣기만 받으므로, 이미지 파일을
+        // 디코딩해 DIB로 만든 뒤 한 장씩 붙여넣고 Enter로 보낸다. 디코딩 실패는
+        // 창을 건드리기 전에 드러낸다.
+        Some(paths) => {
+            let dibs: Vec<Vec<u8>> = paths
+                .iter()
+                .map(|p| image_to_dib(p))
+                .collect::<Result<_, _>>()?;
+            within_focused(hwnd, edit, || {
+                for dib in &dibs {
+                    if set_clipboard_dib(dib).is_err() {
+                        continue;
+                    }
+                    press_ctrl_v();
+                    // 카카오톡이 붙여넣은 이미지 미리보기를 만드는 시간.
+                    sleep(Duration::from_millis(1500));
+                    press_enter();
+                    sleep(Duration::from_millis(800));
+                }
+            });
+        }
+    }
+    dbg_send(|| {
+        format!(
+            "첨부 전송 완료: {}",
+            paths
+                .map(|p| format!("{}개", p.len()))
+                .unwrap_or_else(|| "클립보드".into())
+        )
+    });
+    Ok(())
+}
+
+/// 이미지 파일을 24비트 bottom-up BGR DIB(BITMAPINFOHEADER + 픽셀)로 디코딩한다.
+/// 투명도는 흰 배경에 합성한다. 클립보드 CF_DIB로 올려 Ctrl+V 붙여넣기에 쓴다.
+fn image_to_dib(path: &Path) -> Result<Vec<u8>, PlatformError> {
+    let img = image::open(path).map_err(|e| {
+        PlatformError::Other(format!("이미지 디코딩 실패 {}: {}", path.display(), e))
+    })?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let (w, h) = (w as usize, h as usize);
+    if w == 0 || h == 0 {
+        return Err(PlatformError::Other("빈 이미지입니다".into()));
+    }
+    let row_stride = w
+        .checked_mul(3)
+        .and_then(|n| n.checked_add(3))
+        .map(|n| (n / 4) * 4)
+        .ok_or_else(|| PlatformError::Other("이미지가 너무 큽니다".into()))?;
+    let mut out = Vec::with_capacity(40 + row_stride * h);
+    // BITMAPINFOHEADER (40바이트).
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(w as i32).to_le_bytes());
+    out.extend_from_slice(&(h as i32).to_le_bytes()); // 양수 → bottom-up.
+    out.extend_from_slice(&1u16.to_le_bytes()); // planes
+    out.extend_from_slice(&24u16.to_le_bytes()); // bitcount
+    out.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+    out.extend_from_slice(&((row_stride * h) as u32).to_le_bytes()); // sizeimage
+    out.extend_from_slice(&0i32.to_le_bytes()); // x ppm
+    out.extend_from_slice(&0i32.to_le_bytes()); // y ppm
+    out.extend_from_slice(&0u32.to_le_bytes()); // clr used
+    out.extend_from_slice(&0u32.to_le_bytes()); // clr important
+                                                // 픽셀: bottom-up, 각 행 BGR, 알파는 흰 배경 합성, 행은 4바이트 패딩.
+    for y in (0..h).rev() {
+        for x in 0..w {
+            let px = rgba.get_pixel(x as u32, y as u32).0;
+            let a = px[3] as u32;
+            let blend = |c: u8| ((c as u32 * a + 255 * (255 - a)) / 255) as u8;
+            out.push(blend(px[2])); // B
+            out.push(blend(px[1])); // G
+            out.push(blend(px[0])); // R
+        }
+        out.resize(out.len() + (row_stride - w * 3), 0); // 행 4바이트 패딩
+    }
+    Ok(out)
+}
+
+/// DIB 바이트를 CF_DIB로 클립보드에 올린다.
+fn set_clipboard_dib(dib: &[u8]) -> Result<(), PlatformError> {
+    const CF_DIB: u32 = 8;
+    unsafe {
+        let hglobal: HGLOBAL = GlobalAlloc(GMEM_MOVEABLE, dib.len())
+            .map_err(|e| PlatformError::Other(format!("GlobalAlloc 실패: {e}")))?;
+        let ptr = GlobalLock(hglobal);
+        if ptr.is_null() {
+            return Err(PlatformError::Other("GlobalLock 실패".into()));
+        }
+        std::ptr::copy_nonoverlapping(dib.as_ptr(), ptr as *mut u8, dib.len());
+        let _ = GlobalUnlock(hglobal);
+
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(None).is_ok() {
+                opened = true;
+                break;
+            }
+            sleep(Duration::from_millis(50));
+        }
+        if !opened {
+            return Err(PlatformError::Other("클립보드를 열지 못했습니다".into()));
+        }
+        let _ = EmptyClipboard();
+        if SetClipboardData(CF_DIB, Some(HANDLE(hglobal.0))).is_err() {
+            let _ = CloseClipboard();
+            return Err(PlatformError::Other(
+                "클립보드에 이미지를 올리지 못했습니다".into(),
+            ));
+        }
+        // 성공 시 소유권이 시스템으로 넘어가므로 GlobalFree 하지 않는다.
+        let _ = CloseClipboard();
+    }
+    Ok(())
+}
+
+/// Ctrl+V(붙여넣기)를 저수준 입력으로 보낸다.
+fn press_ctrl_v() {
+    const V: u16 = 0x56;
+    let seq = [
+        vk_input(VK_CONTROL.0, false),
+        vk_input(V, false),
+        vk_input(V, true),
+        vk_input(VK_CONTROL.0, true),
+    ];
+    unsafe {
+        SendInput(&seq, size_of::<INPUT>() as i32);
+    }
+}
+
+fn vk_input(vk: u16, up: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                wScan: 0,
+                dwFlags: if up {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
                 time: 0,
                 dwExtraInfo: 0,
             },

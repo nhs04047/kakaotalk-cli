@@ -130,6 +130,12 @@ enum Command {
         /// 확인 프롬프트 없이 즉시 전송
         #[arg(long, short = 'y')]
         yes: bool,
+        /// 보낼 파일(이미지 포함). 여러 번 지정 가능, 최대 30개. (현재 Windows)
+        #[arg(long = "file", value_name = "PATH")]
+        file: Vec<std::path::PathBuf>,
+        /// 현재 클립보드의 이미지·파일을 보낸다. (현재 Windows)
+        #[arg(long, conflicts_with = "file")]
+        clipboard: bool,
     },
 
     /// AX 트리 덤프 (디버깅용, macOS only)
@@ -214,14 +220,31 @@ fn main() {
             me,
             dry_run,
             yes,
-        } => cmd_send(
-            &cli,
-            chat.as_deref(),
-            message.as_deref(),
-            *me,
-            *dry_run,
-            *yes,
-        ),
+            file,
+            clipboard,
+        } => {
+            if !file.is_empty() || *clipboard {
+                cmd_send_attach(
+                    &cli,
+                    chat.as_deref(),
+                    message.as_deref(),
+                    *me,
+                    file,
+                    *clipboard,
+                    *dry_run,
+                    *yes,
+                )
+            } else {
+                cmd_send(
+                    &cli,
+                    chat.as_deref(),
+                    message.as_deref(),
+                    *me,
+                    *dry_run,
+                    *yes,
+                )
+            }
+        }
         Command::Sync {
             follow,
             interval,
@@ -1673,6 +1696,112 @@ fn cmd_send(
         display::style_success(&format!("✅ '{}'에 메시지를 전송했습니다", target_name))
     );
     Ok(())
+}
+
+/// 파일·이미지 또는 클립보드 전송. 현재 Windows 전용(열린 창에 클립보드 붙여넣기).
+#[allow(clippy::too_many_arguments)]
+fn cmd_send_attach(
+    cli: &Cli,
+    chat: Option<&str>,
+    message: Option<&str>,
+    me: bool,
+    files: &[std::path::PathBuf],
+    clipboard: bool,
+    dry_run: bool,
+    yes: bool,
+) -> Result<(), String> {
+    const MAX_FILES: usize = 30;
+    // 첨부와 텍스트 메시지는 함께 보낼 수 없다(텍스트는 따로). --me일 때 위치 인자는
+    // 메시지 자리이므로, --me가 아닐 때의 message(두 번째 위치 인자)만 충돌로 본다.
+    if !me && message.is_some() {
+        return Err("첨부와 메시지는 함께 보낼 수 없습니다(텍스트는 따로 보내세요).".to_string());
+    }
+    if !clipboard {
+        if files.is_empty() {
+            return Err("보낼 파일이 없습니다 (--file 또는 --clipboard).".to_string());
+        }
+        if files.len() > MAX_FILES {
+            return Err(format!("파일은 최대 {}개까지 보낼 수 있습니다.", MAX_FILES));
+        }
+        for p in files {
+            if !p.is_file() {
+                return Err(format!("파일을 찾을 수 없습니다: {}", p.display()));
+            }
+            // 카카오톡은 이미지 비트맵 붙여넣기만 받으므로 현재 이미지만 지원한다.
+            let is_img = matches!(
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .as_deref(),
+                Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp")
+            );
+            if !is_img {
+                return Err(format!(
+                    "현재 이미지 파일만 전송할 수 있습니다 (png/jpg/jpeg/gif/bmp/webp). 문제 파일: {}",
+                    p.display()
+                ));
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (cli, chat, message, me, dry_run, yes);
+        Err("파일/클립보드 전송은 현재 Windows 전용입니다.".to_string())
+    }
+    #[cfg(windows)]
+    {
+        let target = windows_resolve_send_target(cli, chat, me)?;
+        let what = if clipboard {
+            "클립보드 내용".to_string()
+        } else {
+            files
+                .iter()
+                .map(|p| {
+                    p.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        if dry_run {
+            println!(
+                "{}",
+                display::style_dim(&format!("🔍 미리보기: '{}'에 전송 예정 → {}", target, what))
+            );
+            return Ok(());
+        }
+
+        if !yes {
+            if !std::io::stdin().is_terminal() {
+                return Err("비대화형 환경에서는 --yes(-y) 플래그가 필요합니다.".to_string());
+            }
+            let proceed = inquire::Confirm::new(&format!("'{}'에 전송할까요?\n> {}", target, what))
+                .with_default(false)
+                .prompt()
+                .map_err(|e| format!("전송 확인이 취소되었습니다: {}", e))?;
+            if !proceed {
+                println!("{}", display::style_warn("전송이 취소되었습니다."));
+                return Ok(());
+            }
+        }
+
+        let paths_opt: Option<&[std::path::PathBuf]> = if clipboard { None } else { Some(files) };
+        if me {
+            kakaocli_platform::send_self_attachment(&target, paths_opt)
+                .map_err(|e| format!("전송 실패: {}", e))?;
+        } else {
+            kakaocli_platform::send_attachment(&target, paths_opt)
+                .map_err(|e| format!("전송 실패: {}", e))?;
+        }
+        println!(
+            "{}",
+            display::style_success(&format!("✅ '{}'에 전송했습니다", target))
+        );
+        Ok(())
+    }
 }
 
 fn cmd_login(
