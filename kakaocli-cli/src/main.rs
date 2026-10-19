@@ -1727,6 +1727,20 @@ fn cmd_send_attach(
             if !p.is_file() {
                 return Err(format!("파일을 찾을 수 없습니다: {}", p.display()));
             }
+            // 카카오톡은 이미지 비트맵 붙여넣기만 받으므로 현재 이미지만 지원한다.
+            let is_img = matches!(
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .as_deref(),
+                Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp")
+            );
+            if !is_img {
+                return Err(format!(
+                    "현재 이미지 파일만 전송할 수 있습니다 (png/jpg/jpeg/gif/bmp/webp). 문제 파일: {}",
+                    p.display()
+                ));
+            }
         }
     }
 

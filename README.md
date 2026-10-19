@@ -111,7 +111,7 @@ kakaocli <COMMAND> [OPTIONS]
 | `find <KEYWORD>` | `search` | 메시지 검색 (`--exact`/`--regex`/`--rooms`/`--friends`/`--all`) |
 | `stats` | | 메시지 통계: 방별·날짜별·시간대별 (`--since`, `--top`) |
 | `query <SQL>` | | Raw SQL(읽기 전용) |
-| `send [CHAT] [MSG]` | `say` | 메시지 전송 (`--me`, `--dry-run`, `-y`). 파일·이미지: `--file <경로>`(반복, 최대 30), `--clipboard`(현재 Windows) |
+| `send [CHAT] [MSG]` | `say` | 메시지 전송 (`--me`, `--dry-run`, `-y`). 이미지: `--file <경로>`(반복, 최대 30), `--clipboard` — **이미지 파일만**(png/jpg/gif/bmp/webp), 현재 Windows |
 | `sync` | `tail`, `watch` | 새 메시지 증분 폴링 (`--follow`, `--interval`, `--chat`, `--since`, `--webhook`) |
 | `inspect` | | 접근성 트리 덤프(디버깅, `--chat`, `--depth`) |
 | `login` | | 크레덴셜 저장/확인/삭제 (`--email`, `--password`, `--status`, `--clear`) |

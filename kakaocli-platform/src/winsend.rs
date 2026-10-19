@@ -13,12 +13,12 @@
 //! 오작동 위험 → 미지원). 자기채팅은 친구 탭 최상단 프로필 더블클릭으로 연다.
 
 use std::mem::size_of;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
 
 use windows::core::BOOL;
-use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, POINT, RECT};
+use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, RECT};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
@@ -29,7 +29,6 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEINPUT, VIRTUAL_KEY, VK_CONTROL, VK_RETURN,
 };
-use windows::Win32::UI::Shell::DROPFILES;
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumChildWindows, EnumWindows, GetDlgCtrlID, GetForegroundWindow,
     GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
@@ -484,9 +483,7 @@ fn key_unicode(scan: u16, up: bool) -> INPUT {
     }
 }
 
-// ── 첨부(파일·이미지) 전송 ───────────────────────────────────
-
-const CF_HDROP: u32 = 15;
+// ── 이미지 첨부 전송 ─────────────────────────────────────────
 
 /// 파일·이미지 전송(열린 채팅창에 클립보드 붙여넣기). 파일 경로들을 CF_HDROP로
 /// 클립보드에 올린 뒤 입력창에 Ctrl+V → Enter. KakaoTalk은 복사된 파일 붙여넣기를
@@ -555,18 +552,36 @@ fn deliver_attachment(
     let edit = find_richedit(hwnd)
         .ok_or_else(|| PlatformError::UiError("입력창(RichEdit)을 찾지 못했습니다".into()))?;
 
-    // 파일 지정 시 클립보드에 올린다(전역이라 포커스 전에). None이면 현재 클립보드 사용.
-    if let Some(paths) = paths {
-        set_clipboard_files(paths)?;
+    match paths {
+        // 현재 클립보드 내용 그대로 붙여넣기(예: 사용자가 복사한 이미지).
+        None => within_focused(hwnd, edit, || {
+            press_ctrl_v();
+            sleep(Duration::from_millis(1200));
+            press_enter();
+            sleep(Duration::from_millis(600));
+        }),
+        // 파일: 카카오톡은 CF_DIB(이미지 비트맵) 붙여넣기만 받으므로, 이미지 파일을
+        // 디코딩해 DIB로 만든 뒤 한 장씩 붙여넣고 Enter로 보낸다. 디코딩 실패는
+        // 창을 건드리기 전에 드러낸다.
+        Some(paths) => {
+            let dibs: Vec<Vec<u8>> = paths
+                .iter()
+                .map(|p| image_to_dib(p))
+                .collect::<Result<_, _>>()?;
+            within_focused(hwnd, edit, || {
+                for dib in &dibs {
+                    if set_clipboard_dib(dib).is_err() {
+                        continue;
+                    }
+                    press_ctrl_v();
+                    // 카카오톡이 붙여넣은 이미지 미리보기를 만드는 시간.
+                    sleep(Duration::from_millis(1500));
+                    press_enter();
+                    sleep(Duration::from_millis(800));
+                }
+            });
+        }
     }
-
-    within_focused(hwnd, edit, || {
-        press_ctrl_v();
-        // 첨부는 KakaoTalk이 파일을 읽어 미리보기를 만드는 시간이 필요해 넉넉히 대기.
-        sleep(Duration::from_millis(1200));
-        press_enter();
-        sleep(Duration::from_millis(600));
-    });
     dbg_send(|| {
         format!(
             "첨부 전송 완료: {}",
@@ -578,44 +593,64 @@ fn deliver_attachment(
     Ok(())
 }
 
-/// 파일 경로들을 CF_HDROP 형식으로 클립보드에 올린다(Explorer 복사와 동일).
-fn set_clipboard_files(paths: &[PathBuf]) -> Result<(), PlatformError> {
-    // 절대 경로 UTF-16(각각 널 종료) + 마지막 추가 널.
-    let mut list: Vec<u16> = Vec::new();
-    for p in paths {
-        let abs = std::fs::canonicalize(p).map_err(|e| {
-            PlatformError::Other(format!("파일 경로 확인 실패 {}: {}", p.display(), e))
-        })?;
-        // canonicalize의 \\?\ 접두사는 CF_HDROP에서 제거한다.
-        let s = abs.to_string_lossy();
-        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-        list.extend(s.encode_utf16());
-        list.push(0);
+/// 이미지 파일을 24비트 bottom-up BGR DIB(BITMAPINFOHEADER + 픽셀)로 디코딩한다.
+/// 투명도는 흰 배경에 합성한다. 클립보드 CF_DIB로 올려 Ctrl+V 붙여넣기에 쓴다.
+fn image_to_dib(path: &Path) -> Result<Vec<u8>, PlatformError> {
+    let img = image::open(path).map_err(|e| {
+        PlatformError::Other(format!("이미지 디코딩 실패 {}: {}", path.display(), e))
+    })?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let (w, h) = (w as usize, h as usize);
+    if w == 0 || h == 0 {
+        return Err(PlatformError::Other("빈 이미지입니다".into()));
     }
-    list.push(0); // double-null terminator
+    let row_stride = w
+        .checked_mul(3)
+        .and_then(|n| n.checked_add(3))
+        .map(|n| (n / 4) * 4)
+        .ok_or_else(|| PlatformError::Other("이미지가 너무 큽니다".into()))?;
+    let mut out = Vec::with_capacity(40 + row_stride * h);
+    // BITMAPINFOHEADER (40바이트).
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&(w as i32).to_le_bytes());
+    out.extend_from_slice(&(h as i32).to_le_bytes()); // 양수 → bottom-up.
+    out.extend_from_slice(&1u16.to_le_bytes()); // planes
+    out.extend_from_slice(&24u16.to_le_bytes()); // bitcount
+    out.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+    out.extend_from_slice(&((row_stride * h) as u32).to_le_bytes()); // sizeimage
+    out.extend_from_slice(&0i32.to_le_bytes()); // x ppm
+    out.extend_from_slice(&0i32.to_le_bytes()); // y ppm
+    out.extend_from_slice(&0u32.to_le_bytes()); // clr used
+    out.extend_from_slice(&0u32.to_le_bytes()); // clr important
+                                                // 픽셀: bottom-up, 각 행 BGR, 알파는 흰 배경 합성, 행은 4바이트 패딩.
+    for y in (0..h).rev() {
+        for x in 0..w {
+            let px = rgba.get_pixel(x as u32, y as u32).0;
+            let a = px[3] as u32;
+            let blend = |c: u8| ((c as u32 * a + 255 * (255 - a)) / 255) as u8;
+            out.push(blend(px[2])); // B
+            out.push(blend(px[1])); // G
+            out.push(blend(px[0])); // R
+        }
+        out.resize(out.len() + (row_stride - w * 3), 0); // 행 4바이트 패딩
+    }
+    Ok(out)
+}
 
-    let header = size_of::<DROPFILES>();
-    let total = header + list.len() * 2;
-
+/// DIB 바이트를 CF_DIB로 클립보드에 올린다.
+fn set_clipboard_dib(dib: &[u8]) -> Result<(), PlatformError> {
+    const CF_DIB: u32 = 8;
     unsafe {
-        let hglobal: HGLOBAL = GlobalAlloc(GMEM_MOVEABLE, total)
+        let hglobal: HGLOBAL = GlobalAlloc(GMEM_MOVEABLE, dib.len())
             .map_err(|e| PlatformError::Other(format!("GlobalAlloc 실패: {e}")))?;
         let ptr = GlobalLock(hglobal);
         if ptr.is_null() {
             return Err(PlatformError::Other("GlobalLock 실패".into()));
         }
-        // DROPFILES 헤더.
-        let df = ptr as *mut DROPFILES;
-        (*df).pFiles = header as u32;
-        (*df).pt = POINT { x: 0, y: 0 };
-        (*df).fNC = BOOL(0);
-        (*df).fWide = BOOL(1); // UTF-16 경로.
-                               // 파일 목록 복사.
-        let dst = (ptr as *mut u8).add(header) as *mut u16;
-        std::ptr::copy_nonoverlapping(list.as_ptr(), dst, list.len());
+        std::ptr::copy_nonoverlapping(dib.as_ptr(), ptr as *mut u8, dib.len());
         let _ = GlobalUnlock(hglobal);
 
-        // 클립보드 열기(점유 중일 수 있어 몇 번 재시도).
         let mut opened = false;
         for _ in 0..10 {
             if OpenClipboard(None).is_ok() {
@@ -625,14 +660,13 @@ fn set_clipboard_files(paths: &[PathBuf]) -> Result<(), PlatformError> {
             sleep(Duration::from_millis(50));
         }
         if !opened {
-            // 드문 실패 경로: 작은 할당은 그대로 둔다(프로세스 종료 시 회수).
             return Err(PlatformError::Other("클립보드를 열지 못했습니다".into()));
         }
         let _ = EmptyClipboard();
-        if SetClipboardData(CF_HDROP, Some(HANDLE(hglobal.0))).is_err() {
+        if SetClipboardData(CF_DIB, Some(HANDLE(hglobal.0))).is_err() {
             let _ = CloseClipboard();
             return Err(PlatformError::Other(
-                "클립보드에 파일을 올리지 못했습니다".into(),
+                "클립보드에 이미지를 올리지 못했습니다".into(),
             ));
         }
         // 성공 시 소유권이 시스템으로 넘어가므로 GlobalFree 하지 않는다.
