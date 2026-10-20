@@ -20,9 +20,12 @@ use std::time::Duration;
 use windows::core::BOOL;
 use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND, LPARAM, RECT};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    SetClipboardData,
 };
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
+};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
@@ -568,6 +571,8 @@ fn deliver_attachment(
                 .iter()
                 .map(|p| image_to_dib(p))
                 .collect::<Result<_, _>>()?;
+            // 이미지를 클립보드에 올리므로 사용자가 복사해 둔 내용을 백업했다가 복원한다.
+            let saved = save_clipboard();
             within_focused(hwnd, edit, || {
                 for dib in &dibs {
                     if set_clipboard_dib(dib).is_err() {
@@ -580,6 +585,9 @@ fn deliver_attachment(
                     sleep(Duration::from_millis(800));
                 }
             });
+            if let Some(saved) = saved {
+                restore_clipboard(&saved);
+            }
         }
     }
     dbg_send(|| {
@@ -673,6 +681,95 @@ fn set_clipboard_dib(dib: &[u8]) -> Result<(), PlatformError> {
         let _ = CloseClipboard();
     }
     Ok(())
+}
+
+/// 전송 중 덮어쓸 사용자 클립보드를 백업·복원한다(텍스트·이미지·파일 형식만).
+/// GMEM 기반 표준 형식만 다룬다(CF_BITMAP 등 GDI 핸들 형식은 제외).
+const SAVED_FORMATS: [u32; 5] = [
+    1,  // CF_TEXT
+    13, // CF_UNICODETEXT
+    8,  // CF_DIB
+    17, // CF_DIBV5
+    15, // CF_HDROP
+];
+
+struct SavedClip {
+    entries: Vec<(u32, Vec<u8>)>,
+}
+
+/// 현재 클립보드의 표준 형식 바이트를 복사해 둔다. 실패하면 None(복원 생략).
+fn save_clipboard() -> Option<SavedClip> {
+    unsafe {
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(None).is_ok() {
+                opened = true;
+                break;
+            }
+            sleep(Duration::from_millis(30));
+        }
+        if !opened {
+            return None;
+        }
+        let mut entries = Vec::new();
+        for &f in &SAVED_FORMATS {
+            if IsClipboardFormatAvailable(f).is_err() {
+                continue;
+            }
+            let Ok(handle) = GetClipboardData(f) else {
+                continue;
+            };
+            if handle.0.is_null() {
+                continue; // 지연 렌더링 등
+            }
+            let hg = HGLOBAL(handle.0);
+            let size = GlobalSize(hg);
+            if size == 0 {
+                continue;
+            }
+            let p = GlobalLock(hg);
+            if p.is_null() {
+                continue;
+            }
+            let bytes = std::slice::from_raw_parts(p as *const u8, size).to_vec();
+            let _ = GlobalUnlock(hg);
+            entries.push((f, bytes));
+        }
+        let _ = CloseClipboard();
+        Some(SavedClip { entries })
+    }
+}
+
+/// 백업한 클립보드 내용을 되돌린다.
+fn restore_clipboard(saved: &SavedClip) {
+    unsafe {
+        let mut opened = false;
+        for _ in 0..10 {
+            if OpenClipboard(None).is_ok() {
+                opened = true;
+                break;
+            }
+            sleep(Duration::from_millis(30));
+        }
+        if !opened {
+            return;
+        }
+        let _ = EmptyClipboard();
+        for (f, bytes) in &saved.entries {
+            let Ok(hg) = GlobalAlloc(GMEM_MOVEABLE, bytes.len()) else {
+                continue;
+            };
+            let p = GlobalLock(hg);
+            if p.is_null() {
+                continue;
+            }
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), p as *mut u8, bytes.len());
+            let _ = GlobalUnlock(hg);
+            // 실패 시 그 형식만 건너뛴다(소량 누수 허용).
+            let _ = SetClipboardData(*f, Some(HANDLE(hg.0)));
+        }
+        let _ = CloseClipboard();
+    }
 }
 
 /// Ctrl+V(붙여넣기)를 저수준 입력으로 보낸다.
